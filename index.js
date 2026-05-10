@@ -360,7 +360,7 @@ export default function (pi) {
                 "clear goal",
                 modelLabel,
                 "clear model",
-                "run bench & pick fastest",
+                "Benchmark fastest model",
                 blLabel,
             ];
             const choice = await ctx.ui.select("recap", options);
@@ -417,7 +417,7 @@ export default function (pi) {
                 return;
             }
             // ── Bench & pick fastest ─────────────────────────────
-            if (choice === "run bench & pick fastest") {
+            if (choice === "Benchmark fastest model") {
                 ctx.ui.notify("Running benchmark…", "info");
                 const benchScript = path.join(path.dirname(fileURLToPath(import.meta.resolve("pi-bench/package.json"))), "bench.mts");
                 const outputDir = path.dirname(benchScript);

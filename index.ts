@@ -421,7 +421,7 @@ export default function (pi: ExtensionAPI) {
 				"clear goal",
 				modelLabel,
 				"clear model",
-				"run bench & pick fastest",
+				"Benchmark fastest model",
 				blLabel,
 			];
 
@@ -486,7 +486,7 @@ export default function (pi: ExtensionAPI) {
 
 			// ── Bench & pick fastest ─────────────────────────────
 
-			if (choice === "run bench & pick fastest") {
+			if (choice === "Benchmark fastest model") {
 				ctx.ui.notify("Running benchmark…", "info");
 				const benchScript = path.join(
 					path.dirname(fileURLToPath(import.meta.resolve("pi-bench/package.json"))),
