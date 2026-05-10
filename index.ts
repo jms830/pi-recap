@@ -539,6 +539,12 @@ export default function (pi: ExtensionAPI) {
 							else reject(new Error(`bench exited with code ${code}\n${stderr}`));
 						});
 						child.on("error", reject);
+						// Safety: if the bench process doesn't exit after all models
+						// are tested, kill it after 10s so we don't hang forever.
+						setTimeout(() => {
+							child.kill("SIGTERM");
+							resolve();
+						}, 35_000);
 					});
 					if (!fs.existsSync(csvPath)) {
 						statusWidget?.setBenchProgress(undefined);
