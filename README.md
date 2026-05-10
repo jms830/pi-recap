@@ -12,7 +12,7 @@
 - **Keyboard navigation** — `Ctrl+Shift+R` to focus, `↑↓` to scroll older entries, `Esc` to release
 - **Slash commands** — `/goal` to override the title, `/recap-model` to pick the summarization model, `/recap-blacklist` to manage the model skip-list
 - **Theme-agnostic text colors** — recap headline and body use hardcoded high-contrast colors that work on any theme (light or dark)
-- **Cheap summarization** — auto-selects the fastest/cheapest available model (flash/mini/haiku/turbo) to keep costs near zero
+- **Cheap summarization** — auto-selects the fastest/cheapest available model (flash/mini/haiku/turbo) to keep costs near zero. Curated chain and blacklist seed are imported from [pi-bench](https://github.com/fornace/pi-bench), the source of truth for bench data.
 
 ## Installation
 
@@ -20,6 +20,8 @@ Pi auto-discovers extensions from `~/.pi/agent/extensions/`. Clone the repo ther
 
 ```bash
 git clone https://github.com/fornace/pi-recap.git ~/.pi/agent/extensions/pi-recap
+cd ~/.pi/agent/extensions/pi-recap
+npm install
 ```
 
 Restart pi. The recap panel appears above the editor on your next session.
@@ -74,7 +76,7 @@ The summarization model is selected through a 5-layer chain (top wins):
 
 1. **User override** — set via `/recap-model <id>`
 2. **Cached winner** — 24h TTL from last successful run
-3. **Curated chain** — hand-picked fast/cheap models (gemini-2.5-flash, gpt-4.1-mini, etc.)
+3. **Curated chain** — fast/cheap models imported from [pi-bench](https://github.com/fornace/pi-bench), ordered by bench rank
 4. **Discovery** — regex-scan of available models, sorted by cost
 5. **ctx.model** — pi's configured model (sacred fallback, never blacklisted)
 

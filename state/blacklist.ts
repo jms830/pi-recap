@@ -10,7 +10,7 @@
  * Bootstrap: on first ever load (no file exists), `seedBlacklist()` writes
  * the BLACKLIST_SEED from pi-bench. After that the file is the source of truth.
  * `resetBlacklist()` writes an empty `entries: []` and does NOT re-bootstrap
- * from SEED -- the user explicitly asked for empty.
+ * from BLACKLIST_SEED -- the user explicitly asked for empty.
  *
  * All filesystem writes are best-effort. A permission or disk error must
  * never crash the extension host -- we log and keep the in-memory copy.

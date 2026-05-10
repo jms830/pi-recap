@@ -1,6 +1,6 @@
 {
   "name": "pi-recap",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Session at a glance. Focus a tab to see your goal and the last few turns. Stop scrolling back to remember what you were doing.",
   "license": "MIT",
   "author": "Francesco",

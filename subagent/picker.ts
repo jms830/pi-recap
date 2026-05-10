@@ -8,10 +8,7 @@
  * The chain (top-to-bottom, every layer skips blacklisted ids):
  *   1. user-locked override (modelOverride / preferredId)        -- never blacklisted
  *   2. cached winner with 24h TTL (cachedWinner.id)              -- skipped if expired or blacklisted
- *   3. CURATED_CHAIN -- a hand-picked list of known-good fast/    -- skipped if blacklisted
- *      cheap models, vetted by the v6 bench. The list is
- *      trivially editable -- it's the named const at the top of
- *      this file. Order matters; lowest-cost / fastest first.
+ *   3. CURATED_CHAIN (imported from pi-bench)                  -- skipped if blacklisted
  *   4. regex+sort discovery -- detect family by substring, apply
  *      MIN_VERSION gate, sort by version desc / date desc /
  *      cost asc, take 1 per family in FAMILY_ORDER. Skips ids

@@ -19,7 +19,7 @@
  * v5 picker chain (top-to-bottom, see subagent/picker.ts):
  *   1. user override (modelOverride from /recap-model <id>)
  *   2. cached winner with 24h TTL (cachedRecapModel.cachedAt)
- *   3. CURATED_CHAIN (hand-picked tiny/cheap ids, edit in picker.ts)
+ *   3. CURATED_CHAIN (imported from pi-bench, the source of truth for bench data)
  *   4. regex+sort discovery (1 per family in FAMILY_ORDER)
  *   5. ctx.model (sacred fallback, thinking-off)
  *
