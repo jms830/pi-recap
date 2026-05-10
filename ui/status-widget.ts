@@ -116,6 +116,8 @@ export class StatusWidget implements Component {
 	private wasStreaming: Set<number> = new Set();
 
 	private animTimer: ReturnType<typeof setInterval> | undefined;
+	/** Slow tick for time counter freshness after animations settle. */
+	private slowTimer: ReturnType<typeof setInterval> | undefined;
 
 	/** Per-instance render counter. Drives the decoy-row width so the decoy
 	 *  changes whenever the widget height changes (new history entry arrives).
@@ -156,6 +158,19 @@ export class StatusWidget implements Component {
 			);
 			this.widgetRegistered = true;
 		} else {
+			// Proactively bump the decoy on every external update() call
+			// where history.length hasn't changed yet. This handles the case
+			// where the chat grows (user message appears) BEFORE the recap
+			// streaming entry is added: the widget shifts to a new vertical
+			// position but the decoy needs to change NOW so pi-tui clears the
+			// old rows instead of leaving orphaned blank lines above the user's
+			// message. During animation ticks, update() is never called directly
+			// — only requestRender() from the timer — so this doesn't reintroduce
+			// the per-tick re-render that caused image flashing.
+			const currentLen = getState().history.length;
+			if (currentLen === this.lastHistoryLength) {
+				this.decoyTick = (this.decoyTick + 1) % 8;
+			}
 			this.tui?.requestRender();
 		}
 		this.ensureAnimTimer();
@@ -185,6 +200,7 @@ export class StatusWidget implements Component {
 		if (this.disposed) return;
 		this.disposed = true;
 		this.stopAnimTimer();
+		this.stopSlowTimer();
 		const ctx = this.uiCtx;
 		this.widgetRegistered = false;
 		this.tui = undefined;
@@ -734,6 +750,34 @@ export class StatusWidget implements Component {
 		if (this.animTimer) {
 			clearInterval(this.animTimer);
 			this.animTimer = undefined;
+		}
+	}
+
+	/** Bump the decoy row width. Called before state changes that may shift
+	 *  the widget vertically, so pi-tui clears the old rows. */
+	bumpDecoy(): void {
+		this.decoyTick = (this.decoyTick + 1) % 8;
+	}
+
+	/** Slow tick (30 s) to keep time counters ("now", "14m") fresh after
+	 *  all animations have settled. Much slower than the 80 ms anim timer. */
+	private ensureSlowTimer(): void {
+		if (this.disposed) return;
+		if (!this.slowTimer) {
+			this.slowTimer = setInterval(() => {
+				if (this.disposed) {
+					this.stopSlowTimer();
+					return;
+				}
+				this.tui?.requestRender();
+			}, 30_000);
+		}
+	}
+
+	private stopSlowTimer(): void {
+		if (this.slowTimer) {
+			clearInterval(this.slowTimer);
+			this.slowTimer = undefined;
 		}
 	}
 }
