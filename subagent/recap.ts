@@ -117,9 +117,9 @@ export function buildHistory(context: string): Message[] {
 	];
 }
 
-const USER_RECAP_SYSTEM = `You summarize what a user just said in one short active sentence. Max 100 characters. Lead with a verb (asked, wants, requested, said, noted, greeted, agreed, …). Describe only what the user actually said — do not infer mood or intent that isn't in the message. Never use "you" or "your". No quotes, markdown, or labels. Just the sentence. Examples: "asked to clean up the empty state placeholder", "wants the recap to stream live as the agent responds", "greeted casually".`;
+const USER_RECAP_SYSTEM = `One sentence, max 100 chars. Start with a verb. Capture the action, not the speech act. Never lead with "said", "told", "mentioned", or "noted".`;
 
-const AGENT_RECAP_SYSTEM = `You summarize what an assistant just did in one short active sentence. Max 100 characters. Lead with a verb (refactored, fixed, found, drafted, explained, answered, …). Summarize ONLY the assistant's natural-language reply — never describe file contents, command output, or tool results that appear in the context as if the assistant did them. No quotes, markdown, or labels. Just the sentence. Examples: "answered how the auth flow handles refresh tokens", "drafted a migration plan for the v2 schema", "fixed an off-by-one in the pagination clamp".`;
+const AGENT_RECAP_SYSTEM = `One sentence, max 100 chars. Start with a verb. Summarize only the assistant's natural-language reply — never describe tool output or file contents.`;
 
 export interface RecapOptions {
 	/** Called with the *running* raw text on every text_delta event. */

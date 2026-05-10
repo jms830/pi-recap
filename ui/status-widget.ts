@@ -118,6 +118,7 @@ export class StatusWidget implements Component {
 	private animTimer: ReturnType<typeof setInterval> | undefined;
 	/** Slow tick for time counter freshness after animations settle. */
 	private slowTimer: ReturnType<typeof setInterval> | undefined;
+	private slowInterval: number = 30_000;
 
 	/** Per-instance render counter. Drives the decoy-row width so the decoy
 	 *  changes whenever the widget height changes (new history entry arrives).
@@ -158,19 +159,6 @@ export class StatusWidget implements Component {
 			);
 			this.widgetRegistered = true;
 		} else {
-			// Proactively bump the decoy on every external update() call
-			// where history.length hasn't changed yet. This handles the case
-			// where the chat grows (user message appears) BEFORE the recap
-			// streaming entry is added: the widget shifts to a new vertical
-			// position but the decoy needs to change NOW so pi-tui clears the
-			// old rows instead of leaving orphaned blank lines above the user's
-			// message. During animation ticks, update() is never called directly
-			// — only requestRender() from the timer — so this doesn't reintroduce
-			// the per-tick re-render that caused image flashing.
-			const currentLen = getActiveState().history.length;
-			if (currentLen === this.lastHistoryLength) {
-				this.decoyTick = (this.decoyTick + 1) % 8;
-			}
 			this.tui?.requestRender();
 		}
 		this.ensureAnimTimer();
@@ -236,6 +224,11 @@ export class StatusWidget implements Component {
 
 		this.reconcileAnim(history, now);
 
+		// Adaptive slow tick: 1s while any entry is < 60s old (so "now" → "1m"
+		// transitions on time), 30s otherwise to keep minute counters fresh.
+		const hasRecentEntry = history.length > 0 && (now - history[history.length - 1]!.timestamp) < 60_000;
+		this.ensureSlowTimer(hasRecentEntry);
+
 		const lines: string[] = [];
 
 		// Decoy row: a varying-width whitespace line above the rounded card.
@@ -247,14 +240,20 @@ export class StatusWidget implements Component {
 		// fragment (╭───╮) stranded in scrollback whenever the chat grew and
 		// the widget shifted vertically between renders.
 		//
-		// Only bump the width when history length changes (new entry arrived).
-		// This preserves the anti-artifact behavior while avoiding unnecessary
-		// full re-renders during streaming animation — which would cause inline
-		// images (pi-banana, terminal-image) to flash on every 80 ms tick.
-		if (history.length !== this.lastHistoryLength) {
-			this.decoyTick = (this.decoyTick + 1) % 8;
-			this.lastHistoryLength = history.length;
-		}
+		// Bump the decoy on EVERY render so the whitespace sentinel above the
+		// card always changes. pi-tui diffs frames by row-level string equality
+		// — if the decoy is identical between two renders where the widget
+		// shifted vertically, pi-tui skips clearing the old rows and strands a
+		// ghost box in scrollback. The previous conditional bump ("only when
+		// history length changes") had a gap: update() preemptively bumped
+		// before the history grew, then render() saw the length change and
+		// skipped, reusing the same decoy value at the new position.
+		//
+		// Trade-off: every row below the widget re-renders each tick (80 ms
+		// during animation), which can cause inline images to flash. The
+		// alternative — a ghosted duplicate status box — is worse.
+		this.decoyTick = (this.decoyTick + 1) % 8;
+		this.lastHistoryLength = history.length;
 		lines.push(" ".repeat(1 + this.decoyTick));
 
 		const liveNotice = state.notice && state.notice.expiresAt > now ? state.notice : undefined;
@@ -760,18 +759,32 @@ export class StatusWidget implements Component {
 		this.decoyTick = (this.decoyTick + 1) % 8;
 	}
 
-	/** Slow tick (30 s) to keep time counters ("now", "14m") fresh after
-	 *  all animations have settled. Much slower than the 80 ms anim timer. */
-	private ensureSlowTimer(): void {
+	/** Force a full redraw by clearing pi-tui's frame cache. This ensures
+	 *  the changed decoy row paints immediately, before any subsequent
+	 *  content (user message, agent output) composites on screen. */
+	forceRender(): void {
+		this.tui?.requestRender(true);
+	}
+
+	/** Adaptive slow tick: every 1s while any entry is < 1 min old (so "now"
+	 *  transitions to "1m" on time), then every 30s to keep older counters
+	 *  fresh. Re-evaluated on every render(). */
+	private ensureSlowTimer(hasRecentEntry: boolean): void {
 		if (this.disposed) return;
+		const wantInterval = hasRecentEntry ? 1_000 : 30_000;
+		// If timer exists but at the wrong interval, restart it.
+		if (this.slowTimer && this.slowInterval !== wantInterval) {
+			this.stopSlowTimer();
+		}
 		if (!this.slowTimer) {
+			this.slowInterval = wantInterval;
 			this.slowTimer = setInterval(() => {
 				if (this.disposed) {
 					this.stopSlowTimer();
 					return;
 				}
 				this.tui?.requestRender();
-			}, 30_000);
+			}, wantInterval);
 		}
 	}
 

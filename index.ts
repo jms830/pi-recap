@@ -70,6 +70,10 @@ import {
 	seedBlacklist,
 } from "./state/blacklist.js";
 import { logError } from "./util/log.js";
+import { spawn } from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -162,6 +166,7 @@ function fireSessionStartNotice(
 
 export default function (pi: ExtensionAPI) {
 	let statusWidget: StatusWidget | undefined;
+	let decoyInterval: ReturnType<typeof setInterval> | undefined;
 
 	// ── Session lifecycle ──────────────────────────────────────────
 
@@ -206,42 +211,29 @@ export default function (pi: ExtensionAPI) {
 		statusWidget = undefined;
 	});
 
-	// ── Decoy bump on input (before user message renders) ───────────
-	// The `input` event fires at the very start of session.prompt() —
-	// before skill/template expansion, before before_agent_start, and
-	// crucially before the agent emits the message_start event that
-	// renders the user message in the chat.
-	//
-	// We bump the decoy AND call update() here to force an intermediate
-	// render frame with the changed decoy. This frame paints BEFORE the
-	// chat grows (before addStreamingEntry in before_agent_start) and
-	// BEFORE the user message is rendered. Without this, the decoy bump
-	// gets batched into the same frame as the user message, and pi-tui
-	// never clears the old widget border stranded above it.
-	//
-	// update() also bumps the decoy when history.length is unchanged,
-	// so we get a double-bump here — ensuring the decoy row string is
-	// definitely different from the last painted frame.
-	//
-	// For tool-call scenarios where rendering is more complex, we
-	// run update() for a solid second (10x every 100ms) to ensure
-	// the decoy change makes it through pi-tui's render queue reliably.
+	// ── Decoy animation: user sends → agent starts streaming ───────
+	// Instead of a fixed burst, animate the decoy continuously from the
+	// moment the user submits until the agent actually starts producing
+	// output. This ensures pi-tui never sees a stable decoy row during the
+	// transition, so it can't skip re-rendering rows and strand artifacts.
 	pi.on("input", () => {
+		if (decoyInterval) clearInterval(decoyInterval);
+		// Immediate bump + force render. The `input` event is the earliest
+		// extension hook (before before_agent_start, before skill expansion,
+		// before the agent processes anything). requestRender(true) forces a
+		// full redraw by clearing pi-tui's frame cache, ensuring the changed
+		// decoy paints before the user message frame composites.
 		statusWidget?.bumpDecoy();
-		let count = 0;
-		const interval = setInterval(() => {
-			if (count >= 10) {
-				clearInterval(interval);
-				return;
-			}
+		statusWidget?.forceRender();
+		// Then keep animating until the assistant starts streaming.
+		decoyInterval = setInterval(() => {
+			statusWidget?.bumpDecoy();
 			statusWidget?.update();
-			count++;
 		}, 100);
 		return { action: "continue" };
 	});
 
-	// ── User-recap on before_agent_start ──────────────────────────
-
+	// ── Safety stop: kill decoy animation before recap work ───────
 	pi.on("before_agent_start", (event, ctx) => {
 		if (!ctx.hasUI) return;
 		const sessionId = sid(ctx);
@@ -284,9 +276,22 @@ export default function (pi: ExtensionAPI) {
 		})();
 	});
 
+	// ── Stop decoy when agent starts streaming output ─────────────
+	pi.on("message_start", (event) => {
+		if (event.message?.role === "assistant" && decoyInterval) {
+			clearInterval(decoyInterval);
+			decoyInterval = undefined;
+		}
+	});
+
 	// ── Agent-recap on agent_end + goal derivation in parallel ────
 
 	pi.on("agent_end", (event, ctx) => {
+		// Safety stop: kill decoy animation if message_start didn't fire
+		if (decoyInterval) {
+			clearInterval(decoyInterval);
+			decoyInterval = undefined;
+		}
 		if (!ctx.hasUI) return;
 		const sessionId = sid(ctx);
 
@@ -416,6 +421,7 @@ export default function (pi: ExtensionAPI) {
 				"clear goal",
 				modelLabel,
 				"clear model",
+				"run bench & pick fastest",
 				blLabel,
 			];
 
@@ -475,6 +481,67 @@ export default function (pi: ExtensionAPI) {
 				persistState(sessionId, pi);
 				statusWidget?.update();
 				ctx.ui.notify("Recap model reset to auto-pick.", "info");
+				return;
+			}
+
+			// ── Bench & pick fastest ─────────────────────────────
+
+			if (choice === "run bench & pick fastest") {
+				ctx.ui.notify("Running benchmark…", "info");
+				const benchScript = path.join(
+					path.dirname(fileURLToPath(import.meta.resolve("pi-bench/package.json"))),
+					"bench.mts",
+				);
+				const outputDir = path.dirname(benchScript);
+				const child = spawn("npx", ["-y", "-p", "tsx", "tsx", benchScript, "--output-dir", outputDir], {
+					stdio: ["ignore", "pipe", "pipe"],
+					env: process.env,
+					cwd: outputDir,
+				});
+				let stderr = "";
+				child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+				try {
+					await new Promise<void>((resolve, reject) => {
+						child.on("close", (code) => {
+							if (code === 0) resolve();
+							else reject(new Error(`bench exited with code ${code}\n${stderr}`));
+						});
+						child.on("error", reject);
+					});
+					const csvPath = path.join(outputDir, "bench-results-v6.csv");
+					if (!fs.existsSync(csvPath)) {
+						ctx.ui.notify("Bench finished but no results found.", "warning");
+						return;
+					}
+					const csv = fs.readFileSync(csvPath, "utf8");
+					const lines = csv.split("\n").filter((l) => l.trim());
+					const header = lines[0]!;
+					const cols = header.split(",");
+					const idxId = cols.indexOf("id");
+					const idxProvider = cols.indexOf("provider");
+					const idxLatency = cols.indexOf("t_complete_ms");
+					// Rows are pre-sorted by the bench script; first data row is the fastest.
+					const firstRow = lines[1];
+					if (!firstRow) {
+						ctx.ui.notify("Bench finished but no models ranked.", "warning");
+						return;
+					}
+					const values = firstRow.split(",");
+					const fastestId = values[idxId];
+					const fastestProvider = values[idxProvider];
+					const fastestLatency = values[idxLatency];
+					if (!fastestId) {
+						ctx.ui.notify("Could not parse fastest model from bench results.", "warning");
+						return;
+					}
+					commitState(sessionId, { ...getState(sessionId), modelOverride: fastestId });
+					persistState(sessionId, pi);
+					statusWidget?.update();
+					ctx.ui.notify(`Fastest: ${fastestId} (${fastestProvider}) — ${fastestLatency}ms. Set as recap model.`, "info");
+				} catch (err) {
+					logError("bench failed:", err);
+					ctx.ui.notify(`Bench failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
+				}
 				return;
 			}
 
