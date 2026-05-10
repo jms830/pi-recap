@@ -418,9 +418,11 @@ export default function (pi) {
             }
             // ── Bench & pick fastest ─────────────────────────────
             if (choice === "Benchmark fastest model") {
-                ctx.ui.notify("Running benchmark…", "info");
                 const benchScript = path.join(path.dirname(fileURLToPath(import.meta.resolve("pi-bench/package.json"))), "bench.mts");
                 const outputDir = path.dirname(benchScript);
+                const csvPath = path.join(outputDir, "bench-results-v6.csv");
+                // Run bench, streaming stdout so the user sees progress.
+                ctx.ui.notify("Running benchmark…", "info");
                 const child = spawn("npx", ["-y", "-p", "tsx", "tsx", benchScript, "--output-dir", outputDir], {
                     stdio: ["ignore", "pipe", "pipe"],
                     env: process.env,
@@ -438,11 +440,11 @@ export default function (pi) {
                         });
                         child.on("error", reject);
                     });
-                    const csvPath = path.join(outputDir, "bench-results-v6.csv");
                     if (!fs.existsSync(csvPath)) {
                         ctx.ui.notify("Bench finished but no results found.", "warning");
                         return;
                     }
+                    // Parse CSV → top 10 by latency (CSV is pre-sorted).
                     const csv = fs.readFileSync(csvPath, "utf8");
                     const lines = csv.split("\n").filter((l) => l.trim());
                     const header = lines[0];
@@ -450,24 +452,26 @@ export default function (pi) {
                     const idxId = cols.indexOf("id");
                     const idxProvider = cols.indexOf("provider");
                     const idxLatency = cols.indexOf("t_complete_ms");
-                    // Rows are pre-sorted by the bench script; first data row is the fastest.
-                    const firstRow = lines[1];
-                    if (!firstRow) {
+                    const top10 = lines.slice(1, 11).filter((l) => {
+                        const vals = l.split(",");
+                        return vals[idxId];
+                    });
+                    if (top10.length === 0) {
                         ctx.ui.notify("Bench finished but no models ranked.", "warning");
                         return;
                     }
-                    const values = firstRow.split(",");
-                    const fastestId = values[idxId];
-                    const fastestProvider = values[idxProvider];
-                    const fastestLatency = values[idxLatency];
-                    if (!fastestId) {
-                        ctx.ui.notify("Could not parse fastest model from bench results.", "warning");
+                    const options = top10.map((line) => {
+                        const v = line.split(",");
+                        return `${v[idxId]}  ${v[idxLatency]}ms  (${v[idxProvider]})`;
+                    });
+                    const picked = await ctx.ui.select("Pick recap model", options);
+                    if (!picked)
                         return;
-                    }
-                    commitState(sessionId, { ...getState(sessionId), modelOverride: fastestId });
+                    const modelId = picked.split("  ")[0];
+                    commitState(sessionId, { ...getState(sessionId), modelOverride: modelId });
                     persistState(sessionId, pi);
                     statusWidget?.update();
-                    ctx.ui.notify(`Fastest: ${fastestId} (${fastestProvider}) — ${fastestLatency}ms. Set as recap model.`, "info");
+                    ctx.ui.notify(`Recap model: ${modelId}`, "info");
                 }
                 catch (err) {
                     logError("bench failed:", err);
