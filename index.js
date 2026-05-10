@@ -239,13 +239,10 @@ export default function (pi) {
     pi.on("input", () => {
         if (decoyInterval)
             clearInterval(decoyInterval);
-        // Immediate bump + force render. The `input` event is the earliest
-        // extension hook (before before_agent_start, before skill expansion,
-        // before the agent processes anything). requestRender(true) forces a
-        // full redraw by clearing pi-tui's frame cache, ensuring the changed
-        // decoy paints before the user message frame composites.
+        // Immediate decoy bump so the changed decoy row forces all rows below
+        // the widget to re-render (clearing orphaned border fragments). The
+        // 100ms interval keeps animating until the assistant starts streaming.
         statusWidget?.bumpDecoy();
-        statusWidget?.forceRender();
         // Then keep animating until the assistant starts streaming.
         decoyInterval = setInterval(() => {
             statusWidget?.bumpDecoy();
