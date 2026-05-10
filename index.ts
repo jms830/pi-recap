@@ -568,6 +568,7 @@ export default function (pi: ExtensionAPI) {
 
 				// Spawn bench and stream progress into the recap widget.
 				const benchLines: string[] = ["Benchmarking…"];
+				let benchFastest: { id: string; ms: number } | undefined;
 				statusWidget?.setBenchProgress(benchLines);
 
 				const child = spawn("npx", ["-y", "-p", "tsx", "tsx", benchScript, "--output-dir", outputDir], {
@@ -589,15 +590,25 @@ export default function (pi: ExtensionAPI) {
 						}
 						if (line.includes("->")) {
 							benchTotal++;
+							// Extract model id and latency for fastest tracking.
+							const msMatch = line.match(/->\s*(\d+)ms/);
+							const idMatch = line.match(/\[\S+\]\s*(\S+)\s*->/);
+							if (msMatch && idMatch) {
+								const ms = parseInt(msMatch[1]!);
+								const id = idMatch[1]!;
+								if (!benchFastest || ms < benchFastest.ms) {
+									benchFastest = { id, ms };
+								}
+							}
 							const short = line.replace(/^\[bench\]\s*\[\S+\]\s*/, "");
-							// Drop old counter, add result + new counter.
+							// Rebuild: header + fastest + last 3 results + counter.
 							const cidx = benchLines.findIndex((l) => l.startsWith("⟳ "));
 							if (cidx >= 0) benchLines.splice(cidx, 1);
 							benchLines.push(short);
-							// Keep last 3 results + counter.
-							const results = benchLines.filter((l) => !l.startsWith("⟳ "));
+							const results = benchLines.filter((l) => !l.startsWith("⟳ ") && !l.startsWith("Benchmarking") && !l.startsWith("⚡"));
 							benchLines.length = 0;
 							benchLines.push("Benchmarking…");
+							if (benchFastest) benchLines.push(`⚡ fastest: ${benchFastest.id} — ${benchFastest.ms}ms`);
 							benchLines.push(...results.slice(-3));
 							benchLines.push(`⟳ ${benchTotal} models tested`);
 							statusWidget?.setBenchProgress([...benchLines]);
@@ -623,7 +634,7 @@ export default function (pi: ExtensionAPI) {
 						ctx.ui.notify("Bench finished but no results found.", "warning");
 						return;
 					}
-					// Parse CSV → top 10 by latency (CSV is pre-sorted).
+					// Parse CSV → all results by latency (CSV is pre-sorted).
 					const csv = fs.readFileSync(csvPath, "utf8");
 					const csvLines = csv.split("\n").filter((l) => l.trim());
 					const header = csvLines[0]!;
@@ -632,28 +643,71 @@ export default function (pi: ExtensionAPI) {
 					const idxProvider = cols.indexOf("provider");
 					const idxLatency = cols.indexOf("t_complete_ms");
 					const idxCost = cols.indexOf("cost_usd");
-					const top10 = csvLines.slice(1, 11).filter((l) => {
+					const idxTok = cols.indexOf("output_tokens");
+					const idxQuality = cols.indexOf("quality");
+					const idxReasoned = cols.indexOf("reasoned");
+					const allRows = csvLines.slice(1).filter((l) => {
 						const vals = l.split(",");
-						return vals[idxId];
+						return vals[idxId] && vals[idxLatency];
 					});
-					if (top10.length === 0) {
+					if (allRows.length === 0) {
 						statusWidget?.setBenchProgress(undefined);
 						ctx.ui.notify("Bench finished but no models ranked.", "warning");
 						return;
 					}
-					const options = top10.map((line, i) => {
+					// Column widths for aligned table.
+					const maxIdW = Math.max(30, ...allRows.map((l) => l.split(",")[idxId]!.length));
+					const provW = 14;
+					const latW = 8;
+					const costW = 12;
+					const tokW = 5;
+					const qualW = 8;
+					const pad = (s: string, w: number, right = true) =>
+						right ? s.padEnd(w) : s.padStart(w);
+
+					// Header line (dim).
+					const headerLine = `#   ${pad("model", maxIdW)} ${pad("provider", provW)} ${pad("latency", latW, false)} ${pad("cost", costW, false)} ${pad("tok", tokW, false)} ${"quality"}`;
+
+					// Format cost: show meaningful precision (e.g. $0.000042, not $0).
+					const fmtCost = (raw: string): string => {
+						const n = parseFloat(raw);
+						if (isNaN(n) || n === 0) return "-";
+						if (n < 0.0001) return `$${n.toFixed(7)}`;
+						if (n < 0.01) return `$${n.toFixed(6)}`;
+						if (n < 1) return `$${n.toFixed(5)}`;
+						return `$${n.toFixed(3)}`;
+					};
+
+					const options = allRows.map((line, i) => {
 						const v = line.split(",");
-						const cost = v[idxCost] ? `$${v[idxCost]}` : "";
-						const row = `${v[idxId]!}  ${v[idxLatency]!}ms  ${cost}`;
-						// First row = winner → bold.
-						return i === 0 ? `\x1b[1m${row}\x1b[0m` : row;
+						const rank = String(i + 1).padStart(3);
+						const id = v[idxId]!;
+						const prov = (v[idxProvider] ?? "-").slice(0, provW);
+						const lat = `${v[idxLatency]!}ms`;
+						const cost = fmtCost(v[idxCost] ?? "");
+						const tok = v[idxTok] ?? "-";
+						const qual = (v[idxQuality] ?? "-").slice(0, qualW);
+						const reasoned = v[idxReasoned] === "yes" ? " 🧠" : "";
+
+						const row = `${rank} ${pad(id, maxIdW)} ${pad(prov, provW)} ${pad(lat, latW, false)} ${pad(cost, costW, false)} ${pad(tok, tokW, false)} ${qual}${reasoned}`;
+
+						// Winner gets bold + crown.
+						return i === 0 ? `\x1b[1m👑 ${row}\x1b[0m` : `   ${row}`;
 					});
+
 					// Show results in widget, then clear for user to pick.
-					benchLines.push("Done. Pick your recap model:");
+					const summary = `${allRows.length} models tested · fastest is #1`;
+					benchLines.push(summary);
+					benchLines.push(headerLine);
+					benchLines.push("─".repeat(headerLine.length));
 					benchLines.push(...options);
 					statusWidget?.setBenchProgress(benchLines);
-					// pi's native select: arrow keys, Enter to confirm.
-					const picked = await ctx.ui.select("Pick recap model", options);
+					// pi's native select: arrow keys, Enter to confirm. Scrolls natively.
+					const pickOptions = allRows.map((line, i) => {
+						const v = line.split(",");
+						return `${v[idxId]!}  ${v[idxLatency]!}ms  ${v[idxProvider] ?? ""}`;
+					});
+					const picked = await ctx.ui.select(`Pick recap model (${allRows.length} tested)`, pickOptions);
 					statusWidget?.setBenchProgress(undefined);
 					if (!picked) return;
 					const modelId = picked.split("  ")[0]!;
