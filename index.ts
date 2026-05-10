@@ -494,13 +494,9 @@ export default function (pi: ExtensionAPI) {
 				const outputDir = path.dirname(benchScript);
 				const csvPath = path.join(outputDir, "bench-results-v6.csv");
 
-				// Spawn bench and stream progress to notifications.
-				let progressNotifyId: string | undefined;
-				let progressLines: string[] = [];
-				const flushProgress = () => {
-					const text = progressLines.slice(-3).join("\n");
-					if (text) ctx.ui.notify(text, "info");
-				};
+				// Spawn bench and stream progress into the recap widget.
+				const benchLines: string[] = ["Benchmarking…"];
+				statusWidget?.setBenchProgress(benchLines);
 
 				const child = spawn("npx", ["-y", "-p", "tsx", "tsx", benchScript, "--output-dir", outputDir], {
 					stdio: ["ignore", "pipe", "pipe"],
@@ -514,10 +510,9 @@ export default function (pi: ExtensionAPI) {
 					for (const raw of lines) {
 						const line = raw.trim();
 						if (!line) continue;
-						// Show probing line and model results.
 						if (line.includes("probing") || line.includes("->") || line.includes("timings:") || line.includes("ranked")) {
-							progressLines.push(line.replace(/^\[bench\]\s*/, ""));
-							flushProgress();
+							benchLines.push(line.replace(/^\[bench\]\s*/, ""));
+							statusWidget?.setBenchProgress(benchLines);
 						}
 					}
 				});
@@ -530,30 +525,42 @@ export default function (pi: ExtensionAPI) {
 						child.on("error", reject);
 					});
 					if (!fs.existsSync(csvPath)) {
+						statusWidget?.setBenchProgress(undefined);
 						ctx.ui.notify("Bench finished but no results found.", "warning");
 						return;
 					}
 					// Parse CSV → top 10 by latency (CSV is pre-sorted).
 					const csv = fs.readFileSync(csvPath, "utf8");
-					const lines = csv.split("\n").filter((l) => l.trim());
-					const header = lines[0]!;
+					const csvLines = csv.split("\n").filter((l) => l.trim());
+					const header = csvLines[0]!;
 					const cols = header.split(",");
 					const idxId = cols.indexOf("id");
 					const idxProvider = cols.indexOf("provider");
 					const idxLatency = cols.indexOf("t_complete_ms");
-					const top10 = lines.slice(1, 11).filter((l) => {
+					const idxCost = cols.indexOf("cost_usd");
+					const top10 = csvLines.slice(1, 11).filter((l) => {
 						const vals = l.split(",");
 						return vals[idxId];
 					});
 					if (top10.length === 0) {
+						statusWidget?.setBenchProgress(undefined);
 						ctx.ui.notify("Bench finished but no models ranked.", "warning");
 						return;
 					}
-					const options = top10.map((line) => {
+					const options = top10.map((line, i) => {
 						const v = line.split(",");
-						return `${v[idxId]!}  ${v[idxLatency]!}ms  (${v[idxProvider]!})`;
+						const cost = v[idxCost] ? `$${v[idxCost]}` : "";
+						const row = `${v[idxId]!}  ${v[idxLatency]!}ms  ${cost}`;
+						// First row = winner → bold.
+						return i === 0 ? `\x1b[1m${row}\x1b[0m` : row;
 					});
+					// Show results in widget, then clear for user to pick.
+					benchLines.push("Done. Pick your recap model:");
+					benchLines.push(...options);
+					statusWidget?.setBenchProgress(benchLines);
+					// pi's native select: arrow keys, Enter to confirm.
 					const picked = await ctx.ui.select("Pick recap model", options);
+					statusWidget?.setBenchProgress(undefined);
 					if (!picked) return;
 					const modelId = picked.split("  ")[0]!;
 					commitState(sessionId, { ...getState(sessionId), modelOverride: modelId });
@@ -561,6 +568,7 @@ export default function (pi: ExtensionAPI) {
 					statusWidget?.update();
 					ctx.ui.notify(`Recap model: ${modelId}`, "info");
 				} catch (err) {
+					statusWidget?.setBenchProgress(undefined);
 					logError("bench failed:", err);
 					ctx.ui.notify(`Bench failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
 				}

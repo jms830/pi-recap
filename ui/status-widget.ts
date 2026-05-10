@@ -120,6 +120,10 @@ export class StatusWidget implements Component {
 	private slowTimer: ReturnType<typeof setInterval> | undefined;
 	private slowInterval: number = 30_000;
 
+	/** Transient bench progress lines. When set, the widget interior shows
+	 *  bench progress/results instead of normal recap rows. */
+	private benchLines: string[] | undefined;
+
 	/** Per-instance render counter. Drives the decoy-row width so the decoy
 	 *  changes whenever the widget height changes (new history entry arrives).
 	 *  pi-tui diffs frames by string equality per row index — a changing
@@ -162,6 +166,13 @@ export class StatusWidget implements Component {
 			this.tui?.requestRender();
 		}
 		this.ensureAnimTimer();
+	}
+
+	/** Called by index.ts to push bench progress into the widget interior.
+	 *  Pass lines to display; pass undefined to clear and restore normal view. */
+	setBenchProgress(lines: string[] | undefined): void {
+		this.benchLines = lines;
+		this.update();
 	}
 
 	/** Bound to the ctrl+shift+r shortcut. Toggles focus. Snap, never animate. */
@@ -262,6 +273,22 @@ export class StatusWidget implements Component {
 		);
 
 		const innerWidth = Math.max(0, width - 2 * (1 + BORDER_PAD)); // border+pad on each side
+
+		// Bench mode: show progress lines instead of normal history.
+		if (this.benchLines && this.benchLines.length > 0) {
+			const benchVisible = this.benchLines.slice(-VIEW_SIZE);
+			benchVisible.forEach((line: string) => {
+				const truncated = line.length > innerWidth ? line.slice(0, innerWidth - 1) + "…" : line;
+				const padded = truncated + " ".repeat(Math.max(0, innerWidth - truncated.length));
+				lines.push(this.padRow(theme, width, padded));
+			});
+			// Pad remaining view rows so the card height stays consistent.
+			for (let i = benchVisible.length; i < VIEW_SIZE; i++) {
+				lines.push(this.padRow(theme, width, ""));
+			}
+			lines.push(this.renderBottomBorder(theme, width, history.length));
+			return lines;
+		}
 
 		const total = history.length;
 		const maxOffset = Math.max(0, total - VIEW_SIZE);
