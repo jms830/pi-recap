@@ -584,21 +584,26 @@ export default function (pi) {
                         ctx.ui.notify("Bench finished but no models ranked.", "warning");
                         return;
                     }
-                    // Column widths for aligned table.
-                    const maxIdW = Math.max(30, ...allRows.map((l) => l.split(",")[idxId].length));
-                    const provW = 14;
-                    const latW = 8;
-                    const costW = 12;
-                    const tokW = 5;
-                    const qualW = 8;
-                    const pad = (s, w, right = true) => right ? s.padEnd(w) : s.padStart(w);
-                    // Header line (dim).
-                    const headerLine = `#   ${pad("model", maxIdW)} ${pad("provider", provW)} ${pad("latency", latW, false)} ${pad("cost", costW, false)} ${pad("tok", tokW, false)} ${"quality"}`;
-                    // Format cost: show meaningful precision (e.g. $0.000042, not $0).
+                    // ANSI color helpers.
+                    const green = (s) => `\x1b[32m${s}\x1b[0m`;
+                    const yellow = (s) => `\x1b[33m${s}\x1b[0m`;
+                    const cyan = (s) => `\x1b[36m${s}\x1b[0m`;
+                    const dim = (s) => `\x1b[2m${s}\x1b[0m`;
+                    const bold = (s) => `\x1b[1m${s}\x1b[0m`;
+                    // Column widths — tuned for ~80-col terminal.
+                    const idW = 32;
+                    const provW = 12;
+                    const latW = 7;
+                    const costW = 11;
+                    const tokW = 4;
+                    const qualW = 6;
+                    const padR = (s, w) => s.padEnd(w);
+                    const padL = (s, w) => s.padStart(w);
+                    // Format cost with meaningful precision.
                     const fmtCost = (raw) => {
                         const n = parseFloat(raw);
                         if (isNaN(n) || n === 0)
-                            return "-";
+                            return dim("-");
                         if (n < 0.0001)
                             return `$${n.toFixed(7)}`;
                         if (n < 0.01)
@@ -607,37 +612,54 @@ export default function (pi) {
                             return `$${n.toFixed(5)}`;
                         return `$${n.toFixed(3)}`;
                     };
-                    const options = allRows.map((line, i) => {
+                    // Build select options — styled table rows.
+                    const pickOptions = allRows.map((line, i) => {
                         const v = line.split(",");
-                        const rank = String(i + 1).padStart(3);
-                        const id = v[idxId];
+                        const id = v[idxId].slice(0, idW);
                         const prov = (v[idxProvider] ?? "-").slice(0, provW);
-                        const lat = `${v[idxLatency]}ms`;
+                        const lat = v[idxLatency];
                         const cost = fmtCost(v[idxCost] ?? "");
                         const tok = v[idxTok] ?? "-";
                         const qual = (v[idxQuality] ?? "-").slice(0, qualW);
                         const reasoned = v[idxReasoned] === "yes" ? " 🧠" : "";
-                        const row = `${rank} ${pad(id, maxIdW)} ${pad(prov, provW)} ${pad(lat, latW, false)} ${pad(cost, costW, false)} ${pad(tok, tokW, false)} ${qual}${reasoned}`;
-                        // Winner gets bold + crown.
-                        return i === 0 ? `\x1b[1m👑 ${row}\x1b[0m` : `   ${row}`;
+                        const rank = String(i + 1).padStart(3);
+                        // Color by rank tier.
+                        let row;
+                        if (i === 0) {
+                            // 🥇 Winner — bold green.
+                            row = bold(green(`👑 ${padR(id, idW)} ${padR(prov, provW)} ${padL(lat + "ms", latW)} ${padL(cost, costW)} ${padL(tok, tokW)} ${qual}${reasoned}`));
+                        }
+                        else if (i < 3) {
+                            // 🥈🥉 Podium — yellow.
+                            row = yellow(`${rank} ${padR(id, idW)} ${padR(prov, provW)} ${padL(lat + "ms", latW)} ${padL(cost, costW)} ${padL(tok, tokW)} ${qual}${reasoned}`);
+                        }
+                        else if (i < 10) {
+                            // Top 10 — normal.
+                            row = `${rank} ${padR(id, idW)} ${padR(prov, provW)} ${padL(lat + "ms", latW)} ${padL(cost, costW)} ${padL(tok, tokW)} ${qual}${reasoned}`;
+                        }
+                        else {
+                            // Rest — dim.
+                            row = dim(`${rank} ${padR(id, idW)} ${padR(prov, provW)} ${padL(lat + "ms", latW)} ${padL(cost, costW)} ${padL(tok, tokW)} ${qual}${reasoned}`);
+                        }
+                        return row;
                     });
-                    // Show results in widget, then clear for user to pick.
-                    const summary = `${allRows.length} models tested · fastest is #1`;
+                    // Column header for the select dialog.
+                    const colHeader = dim(`     ${padR("model", idW)} ${padR("provider", provW)} ${padL("latency", latW)} ${padL("cost", costW)} ${padL("tok", tokW)} quality`);
+                    // Widget display: full table with header.
+                    const summary = bold(`${allRows.length} models tested`) + dim(" · fastest is #1");
                     benchLines.push(summary);
-                    benchLines.push(headerLine);
-                    benchLines.push("─".repeat(headerLine.length));
-                    benchLines.push(...options);
+                    benchLines.push(colHeader);
+                    benchLines.push(dim("─".repeat(80)));
+                    benchLines.push(...pickOptions);
                     statusWidget?.setBenchProgress(benchLines);
-                    // pi's native select: arrow keys, Enter to confirm. Scrolls natively.
-                    const pickOptions = allRows.map((line, i) => {
-                        const v = line.split(",");
-                        return `${v[idxId]}  ${v[idxLatency]}ms  ${v[idxProvider] ?? ""}`;
-                    });
-                    const picked = await ctx.ui.select(`Pick recap model (${allRows.length} tested)`, pickOptions);
+                    // Select dialog — shows styled rows, scrolls natively.
+                    const picked = await ctx.ui.select(`${bold("Pick recap model")} ${dim(`(${allRows.length} tested)`)}`, pickOptions);
                     statusWidget?.setBenchProgress(undefined);
                     if (!picked)
                         return;
-                    const modelId = picked.split("  ")[0];
+                    // Extract model id: strip ANSI, then split on whitespace.
+                    const stripped = picked.replace(/\x1b\[[0-9;]*m/g, "").replace(/👑\s*/, "").trim();
+                    const modelId = stripped.split(/\s+/)[0];
                     commitState(sessionId, { ...getState(sessionId), modelOverride: modelId });
                     persistState(sessionId, pi);
                     statusWidget?.update();
