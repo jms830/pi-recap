@@ -65,7 +65,6 @@ import {
 	removeFromBlacklist,
 	resetBlacklist,
 	seedBlacklist,
-	BLACKLIST_FILE_PATH,
 } from "./state/blacklist.js";
 import { logError } from "./util/log.js";
 
@@ -147,7 +146,7 @@ function fireSessionStartNotice(ctx: {
 		before.cachedRecapModel,
 	);
 	if (!pickedId) return;
-	setNotice(`Selected: ${pickedId} · /recap-model to change`, NOTICE_DURATION_MS);
+	setNotice(`Selected: ${pickedId} · /recap to change`, NOTICE_DURATION_MS);
 	seedLastModel(pickedId);
 }
 
@@ -343,50 +342,62 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// ── Slash command: /goal - update session goal manually ────────
+	// ── Slash command: /recap - unified interactive menu ──────────
 
-	pi.registerCommand("goal", {
-		description: "Set, view, or reset the session goal",
-		handler: async (args, ctx) => {
-			const trimmed = args?.trim() ?? "";
+	pi.registerCommand("recap", {
+		description: "Manage session goal, recap model, and blacklist",
+		handler: async (_args, ctx) => {
 			const current = getState();
 
-			if (!trimmed) {
-				const tag = current.goalSource === "manual" ? " (locked)" : "";
-				ctx.ui.notify(
-					current.goal
-						? `Goal${tag}: ${current.goal}`
-						: "No goal yet. It will auto-derive after your first turn, or use /goal <text>.",
-					"info",
-				);
-				return;
-			}
+			// Build menu with context snippets
+			const goalLabel = current.goal
+				? `goal: ${current.goal.slice(0, 40)}${current.goal.length > 40 ? "…" : ""}${current.goalSource === "manual" ? " (locked)" : ""}`
+				: "goal: not set (auto-derives after first turn)";
+			const modelLabel = current.modelOverride
+				? `model: ${current.modelOverride} (override)`
+				: `model: auto-pick${current.lastModel ? ` (last: ${current.lastModel})` : ""}`;
+			const bl = loadBlacklist();
+			const blLabel = `blacklist: ${bl.entries.length} entries`;
 
-			if (trimmed === "reset" || trimmed === "auto") {
-				commitState({ ...current, goal: "", goalSource: "auto", goalAutoTurnsApplied: 0 });
+			const options = [
+				goalLabel,
+				"clear goal",
+				modelLabel,
+				"clear model",
+				blLabel,
+			];
+
+			const choice = await ctx.ui.select("recap", options);
+			if (!choice) return; // dismissed
+
+			// ── Goal ────────────────────────────────────────────────
+
+			if (choice === goalLabel) {
+				const input = await ctx.ui.input(
+					"Session goal",
+					current.goalSource === "manual" ? current.goal : undefined,
+				);
+				if (!input) return; // cancelled
+				const next = input.trim().slice(0, 60);
+				if (!next) return;
+				commitState({ ...getState(), goal: next, goalSource: "manual", goalAutoTurnsApplied: 2 });
 				persistState(pi);
 				statusWidget?.update();
-				ctx.ui.notify("Goal reset. Will auto-derive next turn.", "info");
+				ctx.ui.notify(`Goal locked: ${next}`, "info");
 				return;
 			}
 
-			const next = trimmed.slice(0, 60);
-			commitState({ ...current, goal: next, goalSource: "manual", goalAutoTurnsApplied: 2 });
-			persistState(pi);
-			statusWidget?.update();
-			ctx.ui.notify(`Goal locked: ${next}`, "info");
-		},
-	});
+			if (choice === "clear goal") {
+				commitState({ ...getState(), goal: "", goalSource: "auto", goalAutoTurnsApplied: 0 });
+				persistState(pi);
+				statusWidget?.update();
+				ctx.ui.notify("Goal cleared. Will auto-derive next turn.", "info");
+				return;
+			}
 
-	// ── Slash command: /recap-model - inspect or override the recap model ──
+			// ── Model ───────────────────────────────────────────────
 
-	pi.registerCommand("recap-model", {
-		description: "Show or change the model used to generate recaps",
-		handler: async (args, ctx) => {
-			const current = getState();
-			const trimmed = args?.trim() ?? "";
-
-			if (!trimmed) {
+			if (choice === modelLabel) {
 				const available = await listAvailableFastModels(ctx.modelRegistry);
 				const fastList = available.filter((id) => {
 					const lower = id.toLowerCase();
@@ -394,102 +405,89 @@ export default function (pi: ExtensionAPI) {
 					return lower.includes("flash") || hasMini || lower.includes("haiku")
 						|| lower.includes("turbo") || lower.includes("lite");
 				});
-				const cachedTag = current.cachedRecapModel
-					? `${current.cachedRecapModel.id} (cached)`
-					: "none yet";
-				const lines = [
-					current.modelOverride
-						? `Override: ${current.modelOverride}`
-						: `Auto-pick (last used: ${current.lastModel ?? "none yet"})`,
-					`Picker chain: override -> cached(${cachedTag}, 24h TTL) -> curated -> discovery -> session model`,
-					fastList.length > 0
-						? `Fast models available: ${fastList.join(", ")}`
-						: "No fast models with valid keys.",
-					`Use "/recap-model <id>" to lock, "/recap-model reset" to auto.`,
-				];
-				ctx.ui.notify(lines.join("\n"), "info");
+				if (fastList.length === 0) {
+					ctx.ui.notify("No fast models with valid keys available.", "warning");
+					return;
+				}
+				const picked = await ctx.ui.select("Recap model", fastList);
+				if (!picked) return;
+				commitState({ ...getState(), modelOverride: picked });
+				persistState(pi);
+				statusWidget?.update();
+				ctx.ui.notify(`Recap model set: ${picked}`, "info");
 				return;
 			}
 
-			if (trimmed === "reset" || trimmed === "default" || trimmed === "auto") {
-				commitState({ ...current, modelOverride: undefined });
+			if (choice === "clear model") {
+				commitState({ ...getState(), modelOverride: undefined });
 				persistState(pi);
 				statusWidget?.update();
 				ctx.ui.notify("Recap model reset to auto-pick.", "info");
 				return;
 			}
 
-			commitState({ ...current, modelOverride: trimmed });
-			persistState(pi);
-			statusWidget?.update();
-			ctx.ui.notify(`Recap model set: ${trimmed}`, "info");
-		},
-	});
+			// ── Blacklist ───────────────────────────────────────────
 
-	// ── Slash command: /recap-blacklist - inspect or mutate blacklist ─────
-
-	pi.registerCommand("recap-blacklist", {
-		description: "List, add, remove, reset, or seed the recap-model blacklist",
-		handler: async (args, ctx) => {
-			const trimmed = (args ?? "").trim();
-			if (!trimmed) {
-				const b = loadBlacklist();
-				if (b.entries.length === 0) {
-					ctx.ui.notify(`Blacklist is empty (${BLACKLIST_FILE_PATH})`, "info");
+			if (choice === blLabel) {
+				const blCurrent = loadBlacklist();
+				if (blCurrent.entries.length === 0) {
+					const blAction = await ctx.ui.select("Blacklist is empty", ["seed defaults"]);
+					if (blAction === "seed defaults") {
+						seedBlacklist();
+						const after = loadBlacklist();
+						ctx.ui.notify(`Blacklist seeded. ${after.entries.length} entries.`, "info");
+					}
 					return;
 				}
-				const lines = [`Blacklist (${b.entries.length} entries) at ${BLACKLIST_FILE_PATH}:`];
-				for (const e of b.entries) {
-					lines.push(`  ${e.id} -- ${e.reason} [${e.addedBy} ${e.addedAt}]`);
-				}
-				ctx.ui.notify(lines.join("\n"), "info");
-				return;
-			}
 
-			const space = trimmed.indexOf(" ");
-			const sub = (space < 0 ? trimmed : trimmed.slice(0, space)).toLowerCase();
-			const rest = space < 0 ? "" : trimmed.slice(space + 1).trim();
+				const blOptions = [
+					"view entries",
+					"add entry",
+					"remove entry",
+					"reset",
+					"re-seed defaults",
+				];
+				const blChoice = await ctx.ui.select("Blacklist", blOptions);
+				if (!blChoice) return;
 
-			if (sub === "add") {
-				if (!rest) {
-					ctx.ui.notify(`Usage: /recap-blacklist add <id> [reason words...]`, "warning");
+				if (blChoice === "view entries") {
+					const lines = blCurrent.entries.map((e) => `${e.id} — ${e.reason} [${e.addedBy}]`);
+					ctx.ui.notify(lines.join("\n"), "info");
 					return;
 				}
-				const idEnd = rest.indexOf(" ");
-				const id = idEnd < 0 ? rest : rest.slice(0, idEnd);
-				const reason = idEnd < 0 ? "user added" : rest.slice(idEnd + 1).trim() || "user added";
-				addToBlacklist(id, reason, "user");
-				ctx.ui.notify(`Blacklisted ${id} (${reason}).`, "info");
-				return;
-			}
 
-			if (sub === "remove" || sub === "rm") {
-				if (!rest) {
-					ctx.ui.notify(`Usage: /recap-blacklist remove <id>`, "warning");
+				if (blChoice === "add entry") {
+					const id = await ctx.ui.input("Model ID to blacklist");
+					if (!id?.trim()) return;
+					const reason = await ctx.ui.input("Reason (optional)", "user added");
+					addToBlacklist(id.trim(), (reason || "user added").trim(), "user");
+					ctx.ui.notify(`Blacklisted ${id.trim()}.`, "info");
 					return;
 				}
-				const removed = removeFromBlacklist(rest);
-				ctx.ui.notify(removed ? `Removed ${rest}.` : `${rest} not found.`, "info");
-				return;
-			}
 
-			if (sub === "reset") {
-				resetBlacklist();
-				ctx.ui.notify(`Blacklist reset (entries: []).`, "info");
-				return;
-			}
+				if (blChoice === "remove entry") {
+					const blForRemove = loadBlacklist();
+					const ids = blForRemove.entries.map((e) => e.id);
+					const pick = await ctx.ui.select("Remove from blacklist", ids);
+					if (!pick) return;
+					const removed = removeFromBlacklist(pick);
+					ctx.ui.notify(removed ? `Removed ${pick}.` : `${pick} not found.`, "info");
+					return;
+				}
 
-			if (sub === "seed") {
-				seedBlacklist();
-				const after = loadBlacklist();
-				ctx.ui.notify(`Blacklist seeded. Total entries: ${after.entries.length}.`, "info");
-				return;
-			}
+				if (blChoice === "reset") {
+					resetBlacklist();
+					ctx.ui.notify("Blacklist reset.", "info");
+					return;
+				}
 
-			ctx.ui.notify(
-				`Unknown subcommand "${sub}". Use: /recap-blacklist [add|remove|reset|seed]`,
-				"warning",
-			);
+				if (blChoice === "re-seed defaults") {
+					seedBlacklist();
+					const after = loadBlacklist();
+					ctx.ui.notify(`Blacklist re-seeded. ${after.entries.length} entries.`, "info");
+					return;
+				}
+			}
 		},
 	});
 }

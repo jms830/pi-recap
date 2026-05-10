@@ -36,17 +36,15 @@ The panel is passive — it just shows the last few turns. No configuration need
 
 ### Slash commands
 
-| Command | Description |
+Type `/recap` for the interactive menu. No arguments needed — everything is selection-based.
+
+| Menu path | Description |
 |---|---|
-| `/goal <text>` | Override the session title |
-| `/goal clear` | Remove override, return to auto-derivation |
-| `/recap-model` | List available fast models and select one |
-| `/recap-model clear` | Remove model override |
-| `/recap-blacklist add <id> [reason]` | Skip a model from the picker chain |
-| `/recap-blacklist remove <id>` | Re-enable a model |
-| `/recap-blacklist list` | Show current blacklist |
-| `/recap-blacklist reset` | Clear the blacklist entirely |
-| `/recap-blacklist seed` | Re-populate with known-bad defaults |
+| `/recap` → **goal: ...** | Set/override the session goal (text input) |
+| `/recap` → **clear goal** | Remove override, return to auto-derivation |
+| `/recap` → **model: ...** | Pick from available fast models (select list) |
+| `/recap` → **clear model** | Remove model override |
+| `/recap` → **blacklist: N entries** → **view / add / remove / reset / re-seed** | Manage the model skip-list |
 
 ## Architecture
 
