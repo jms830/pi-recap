@@ -20,8 +20,7 @@
  *   1. user override (modelOverride from /recap-model <id>)
  *   2. cached winner with 24h TTL (cachedRecapModel.cachedAt)
  *   3. CURATED_CHAIN (imported from pi-bench, the source of truth for bench data)
- *   4. regex+sort discovery (1 per family in FAMILY_ORDER)
- *   5. ctx.model (sacred fallback, thinking-off)
+ *   4. ctx.model (sacred fallback, thinking-off)
  *
  * v5 surfaces:
  *   - state/blacklist.json: persistent skip-list with seed; addressed by
@@ -197,6 +196,13 @@ export default function (pi: ExtensionAPI) {
 		if (!ctx.hasUI) return;
 		const prompt = event.prompt?.trim();
 		if (!prompt) return;
+
+		// Bump the decoy BEFORE calling update() so the decoy is already
+		// changed when pi-tui composites the frame that includes the new user
+		// message. Without this, pi-tui may render the user message (shifting
+		// the widget down) before update() bumps the decoy, leaving an orphan
+		// border fragment above the user message in scrollback.
+		statusWidget?.bumpDecoy();
 
 		// Allocate a streaming entry up front so the widget shows a "you"
 		// row immediately. The stream then writes deltas straight into it.

@@ -63,7 +63,7 @@ pi-recap/
 ├── subagent/
 │   ├── recap.ts       # User & agent recap generation (streams from cheap model)
 │   ├── goal.ts        # Session goal derivation (streams from cheap model)
-│   └── picker.ts      # Model selection chain: override → cache → curated → discovery → ctx.model
+│   └── picker.ts      # Model selection chain: override → cache → curated → ctx.model
 ├── ui/
 │   ├── status-widget.ts  # TUI component (rendered above editor)
 │   └── anim.ts        # Animation primitives (streaming dot, settle sweep, color utilities)
@@ -74,13 +74,12 @@ pi-recap/
 
 ### Model picker chain
 
-The summarization model is selected through a 5-layer chain (top wins):
+The summarization model is selected through a 4-layer chain (top wins):
 
 1. **User override** — set via `/recap-model <id>`
 2. **Cached winner** — 24h TTL from last successful run
 3. **Curated chain** — fast/cheap models imported from [pi-bench](https://github.com/fornace/pi-bench), ordered by bench rank
-4. **Discovery** — regex-scan of available models, sorted by cost
-5. **ctx.model** — pi's configured model (sacred fallback, never blacklisted)
+4. **Session model** — pi's configured model (sacred fallback, never blacklisted)
 
 ## Development
 

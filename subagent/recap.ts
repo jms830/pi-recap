@@ -9,7 +9,7 @@
  * (markdown-stripped, first non-empty line, capped at 100 chars).
  *
  * v5 picker integration:
- *   - The picker chain is the 5-layer chain from picker.ts.
+ *   - The picker chain is the 4-layer chain from picker.ts.
  *   - Per-attempt failures are classified into 4 buckets:
  *       * 4xx/5xx (NOT 429)             auto-blacklisted (404 retired etc.)
  *       * empty + reasoning              auto-blacklisted (broken for our use)
