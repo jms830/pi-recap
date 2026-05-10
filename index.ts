@@ -7,22 +7,24 @@
  * focuses the panel; arrow keys walk the history; Esc releases.
  *
  * Architecture:
+ *   - State is keyed by sessionId (ctx.sessionManager.getSessionId()).
+ *     Multiple concurrent sessions each get their own isolated state cell —
+ *     no cross-session bleed.
+ *   - The widget reads from the active session's state cell on each render().
  *   - Each stream binds to its own HistoryEntry id. before_agent_start
  *     creates a "user" streaming entry up front; agent_end creates an
  *     "agent" streaming entry. The two streams run in parallel - they
  *     write to different entries so they cannot collide.
- *   - The widget reads straight from state on each render() and animates
- *     per-entry. Multiple rows can stream at once.
  *   - Goal auto-derivation runs in parallel with the agent recap on
  *     agent_end, no UI surface of its own.
  *
- * v5 picker chain (top-to-bottom, see subagent/picker.ts):
+ * v6 picker chain (top-to-bottom, see subagent/picker.ts):
  *   1. user override (modelOverride from /recap-model <id>)
  *   2. cached winner with 24h TTL (cachedRecapModel.cachedAt)
  *   3. CURATED_CHAIN (imported from pi-bench, the source of truth for bench data)
  *   4. ctx.model (sacred fallback, thinking-off)
  *
- * v5 surfaces:
+ * v6 surfaces:
  *   - state/blacklist.json: persistent skip-list with seed; addressed by
  *     auto-blacklist on failure and by /recap-blacklist subcommands.
  *   - session-start toast: state.notice ("Selected: <id> · /recap-model
@@ -39,11 +41,13 @@ import {
 	clearCachedGoalModel,
 	clearCachedRecapModel,
 	commitState,
+	dropSession,
 	finalizeEntry,
 	getState,
 	removeEntry,
 	replaceState,
 	seedLastModel,
+	setActiveSessionId,
 	setCachedGoalModel,
 	setCachedRecapModel,
 	setNotice,
@@ -73,6 +77,11 @@ import { logError } from "./util/log.js";
  *  title-right slot reverts to the model tag. */
 const NOTICE_DURATION_MS = 2500;
 
+/** Extract the session id from the event context. */
+function sid(ctx: { sessionManager: { getSessionId(): string } }): string {
+	return ctx.sessionManager.getSessionId();
+}
+
 /** Single pass over the session branch: returns the trailing window of
  *  user+assistant messages and the total user-turn count. Folded together so
  *  the agent_end handler walks the branch once instead of twice. */
@@ -100,8 +109,8 @@ function scanBranch(
  *  recap entry that's still streaming when this fires would otherwise
  *  re-load as a zombie spinner. The transient `notice` field is intentionally
  *  not persisted so toasts never resurrect on session reload. */
-function persistState(pi: ExtensionAPI): void {
-	const state = getState();
+function persistState(sessionId: string, pi: ExtensionAPI): void {
+	const state = getState(sessionId);
 	pi.appendEntry("recap", {
 		goal: state.goal,
 		goalSource: state.goalSource,
@@ -132,11 +141,11 @@ function persistState(pi: ExtensionAPI): void {
  * blank in the window between toast expiry (2.5s) and the first finalize.
  * The actual winner from finalizeEntry overwrites this value once it lands.
  */
-function fireSessionStartNotice(ctx: {
-	model: { id: string } | undefined;
-	modelRegistry: any;
-}): void {
-	const before = getState();
+function fireSessionStartNotice(
+	sessionId: string,
+	ctx: { model: { id: string } | undefined; modelRegistry: any },
+): void {
+	const before = getState(sessionId);
 	const sessionModel = ctx.model as any;
 	const pickedId = previewFirstPick(
 		ctx.modelRegistry,
@@ -145,8 +154,8 @@ function fireSessionStartNotice(ctx: {
 		before.cachedRecapModel,
 	);
 	if (!pickedId) return;
-	setNotice(`Selected: ${pickedId} · /recap to change`, NOTICE_DURATION_MS);
-	seedLastModel(pickedId);
+	setNotice(sessionId, `Selected: ${pickedId} · /recap to change`, NOTICE_DURATION_MS);
+	seedLastModel(sessionId, pickedId);
 }
 
 // ── Extension ─────────────────────────────────────────────────────────
@@ -157,7 +166,9 @@ export default function (pi: ExtensionAPI) {
 	// ── Session lifecycle ──────────────────────────────────────────
 
 	pi.on("session_start", async (_event, ctx) => {
-		replaceState(replayFromBranch(ctx));
+		const sessionId = sid(ctx);
+		setActiveSessionId(sessionId);
+		replaceState(sessionId, replayFromBranch(ctx));
 
 		// Bootstrap the blacklist file on first ever session_start. seedBlacklist()
 		// is idempotent: subsequent calls won't duplicate entries.
@@ -170,22 +181,27 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.hasUI) {
 			statusWidget ??= new StatusWidget();
 			statusWidget.setUICtx(ctx.ui);
-			fireSessionStartNotice(ctx);
+			fireSessionStartNotice(sessionId, ctx);
 			statusWidget.update();
 		}
 	});
 
 	pi.on("session_compact", async (_event, ctx) => {
-		replaceState(replayFromBranch(ctx));
+		const sessionId = sid(ctx);
+		setActiveSessionId(sessionId);
+		replaceState(sessionId, replayFromBranch(ctx));
 		statusWidget?.update();
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
-		replaceState(replayFromBranch(ctx));
+		const sessionId = sid(ctx);
+		setActiveSessionId(sessionId);
+		replaceState(sessionId, replayFromBranch(ctx));
 		statusWidget?.update();
 	});
 
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (_event, ctx) => {
+		dropSession(sid(ctx));
 		statusWidget?.dispose();
 		statusWidget = undefined;
 	});
@@ -194,6 +210,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", (event, ctx) => {
 		if (!ctx.hasUI) return;
+		const sessionId = sid(ctx);
 		const prompt = event.prompt?.trim();
 		if (!prompt) return;
 
@@ -206,35 +223,35 @@ export default function (pi: ExtensionAPI) {
 
 		// Allocate a streaming entry up front so the widget shows a "you"
 		// row immediately. The stream then writes deltas straight into it.
-		const entryId = addStreamingEntry("user");
+		const entryId = addStreamingEntry(sessionId, "user");
 		statusWidget?.update();
 
-		const before = getState();
+		const before = getState(sessionId);
 		const sessionModel = ctx.model;
 		void (async () => {
 			try {
 				const { result, cachedWinnerCleared } = await generateUserRecap(prompt, ctx.modelRegistry, {
 					onDelta: (running) => {
-						updateEntryText(entryId, running);
+						updateEntryText(sessionId, entryId, running);
 						statusWidget?.update();
 					},
 					preferredModelId: before.modelOverride,
 					sessionModel,
 					cachedWinner: before.cachedRecapModel,
 				});
-				if (cachedWinnerCleared) clearCachedRecapModel();
+				if (cachedWinnerCleared) clearCachedRecapModel(sessionId);
 				if (!result) {
-					removeEntry(entryId);
+					removeEntry(sessionId, entryId);
 					statusWidget?.update();
 					return;
 				}
-				finalizeEntry(entryId, result.recap, result.modelId);
-				setCachedRecapModel(result.modelId);
-				persistState(pi);
+				finalizeEntry(sessionId, entryId, result.recap, result.modelId);
+				setCachedRecapModel(sessionId, result.modelId);
+				persistState(sessionId, pi);
 				statusWidget?.update();
 			} catch (err) {
 				logError("user recap failed:", err);
-				removeEntry(entryId);
+				removeEntry(sessionId, entryId);
 				statusWidget?.update();
 			}
 		})();
@@ -244,9 +261,10 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_end", (event, ctx) => {
 		if (!ctx.hasUI) return;
+		const sessionId = sid(ctx);
 
 		const { messages: branchMessages, userTurnCount } = scanBranch(ctx);
-		const before = getState();
+		const before = getState(sessionId);
 
 		// Goal derivation: parallel, no UI.
 		const shouldDeriveGoal =
@@ -268,18 +286,18 @@ export default function (pi: ExtensionAPI) {
 					const { result, cachedWinnerCleared } = isFirst
 						? await deriveGoalInitial(branchMessages, ctx.modelRegistry, goalOpts)
 						: await deriveGoalRefine(before.goal, branchMessages, ctx.modelRegistry, goalOpts);
-					if (cachedWinnerCleared) clearCachedGoalModel();
-					const current = getState();
+					if (cachedWinnerCleared) clearCachedGoalModel(sessionId);
+					const current = getState(sessionId);
 					if (current.goalSource === "manual") return; // manual lock landed in-flight
-					if (result?.modelId) setCachedGoalModel(result.modelId);
+					if (result?.modelId) setCachedGoalModel(sessionId, result.modelId);
 					const nextGoal = result?.action === "update" && result.goal ? result.goal : current.goal;
-					commitState({
-						...getState(),
+					commitState(sessionId, {
+						...getState(sessionId),
 						goal: nextGoal,
 						goalSource: "auto",
 						goalAutoTurnsApplied: Math.min(2, userTurnCount),
 					});
-					persistState(pi);
+					persistState(sessionId, pi);
 					statusWidget?.update();
 					// Mirror into pi's session label. Fire-and-forget; if pi
 					// throws here it must NOT tank the widget update above.
@@ -298,18 +316,18 @@ export default function (pi: ExtensionAPI) {
 
 		// Agent recap: own entry id, runs concurrently with the user-recap
 		// stream that may still be wrapping up from before_agent_start.
-		const entryId = addStreamingEntry("agent");
+		const entryId = addStreamingEntry(sessionId, "agent");
 		statusWidget?.update();
 
 		void (async () => {
 			try {
-				const beforeAgent = getState();
+				const beforeAgent = getState(sessionId);
 				const { result, cachedWinnerCleared } = await generateAgentRecap(
 					event.messages,
 					ctx.modelRegistry,
 					{
 						onDelta: (running) => {
-							updateEntryText(entryId, running);
+							updateEntryText(sessionId, entryId, running);
 							statusWidget?.update();
 						},
 						preferredModelId: beforeAgent.modelOverride,
@@ -317,19 +335,19 @@ export default function (pi: ExtensionAPI) {
 						cachedWinner: beforeAgent.cachedRecapModel,
 					},
 				);
-				if (cachedWinnerCleared) clearCachedRecapModel();
+				if (cachedWinnerCleared) clearCachedRecapModel(sessionId);
 				if (!result) {
-					removeEntry(entryId);
+					removeEntry(sessionId, entryId);
 					statusWidget?.update();
 					return;
 				}
-				finalizeEntry(entryId, result.recap, result.modelId);
-				setCachedRecapModel(result.modelId);
-				persistState(pi);
+				finalizeEntry(sessionId, entryId, result.recap, result.modelId);
+				setCachedRecapModel(sessionId, result.modelId);
+				persistState(sessionId, pi);
 				statusWidget?.update();
 			} catch (err) {
 				logError("agent recap failed:", err);
-				removeEntry(entryId);
+				removeEntry(sessionId, entryId);
 				statusWidget?.update();
 			}
 		})();
@@ -353,7 +371,8 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("recap", {
 		description: "Manage session goal, recap model, and blacklist",
 		handler: async (_args, ctx) => {
-			const current = getState();
+			const sessionId = sid(ctx);
+			const current = getState(sessionId);
 
 			// Build menu with context snippets
 			const goalLabel = current.goal
@@ -386,16 +405,16 @@ export default function (pi: ExtensionAPI) {
 				if (!input) return; // cancelled
 				const next = input.trim().slice(0, 60);
 				if (!next) return;
-				commitState({ ...getState(), goal: next, goalSource: "manual", goalAutoTurnsApplied: 2 });
-				persistState(pi);
+				commitState(sessionId, { ...getState(sessionId), goal: next, goalSource: "manual", goalAutoTurnsApplied: 2 });
+				persistState(sessionId, pi);
 				statusWidget?.update();
 				ctx.ui.notify(`Goal locked: ${next}`, "info");
 				return;
 			}
 
 			if (choice === "clear goal") {
-				commitState({ ...getState(), goal: "", goalSource: "auto", goalAutoTurnsApplied: 0 });
-				persistState(pi);
+				commitState(sessionId, { ...getState(sessionId), goal: "", goalSource: "auto", goalAutoTurnsApplied: 0 });
+				persistState(sessionId, pi);
 				statusWidget?.update();
 				ctx.ui.notify("Goal cleared. Will auto-derive next turn.", "info");
 				return;
@@ -417,16 +436,16 @@ export default function (pi: ExtensionAPI) {
 				}
 				const picked = await ctx.ui.select("Recap model", fastList);
 				if (!picked) return;
-				commitState({ ...getState(), modelOverride: picked });
-				persistState(pi);
+				commitState(sessionId, { ...getState(sessionId), modelOverride: picked });
+				persistState(sessionId, pi);
 				statusWidget?.update();
 				ctx.ui.notify(`Recap model set: ${picked}`, "info");
 				return;
 			}
 
 			if (choice === "clear model") {
-				commitState({ ...getState(), modelOverride: undefined });
-				persistState(pi);
+				commitState(sessionId, { ...getState(sessionId), modelOverride: undefined });
+				persistState(sessionId, pi);
 				statusWidget?.update();
 				ctx.ui.notify("Recap model reset to auto-pick.", "info");
 				return;

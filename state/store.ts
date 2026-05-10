@@ -1,23 +1,25 @@
 /**
- * Module-level state cell for pi-recap.
+ * Per-session state map for pi-recap.
+ *
+ * Each session (keyed by ctx.sessionManager.getSessionId()) gets its own
+ * StatusState cell. The active session tracks which session's UI is
+ * currently mounted so the widget renders the correct data.
  *
  * Adds per-entry helpers used by the streaming pipeline:
- *   - addStreamingEntry(speaker)    starts a new history row in streaming mode
- *   - updateEntryText(id, text)     replaces the running text for that row
- *   - finalizeEntry(id, recap)      drops streaming flag, swaps in clean recap
- *   - removeEntry(id)               drops a row (used when the stream fails)
+ *   - addStreamingEntry(sessionId, speaker)
+ *   - updateEntryText(sessionId, id, text)
+ *   - finalizeEntry(sessionId, id, recap, modelId)
+ *   - removeEntry(sessionId, id)
  *
  * Cached-winner helpers (v5):
- *   - setCachedRecapModel(id)       wraps in {id, cachedAt: now}
- *   - clearCachedRecapModel()       drops the cache (after detected failure)
- *   - setCachedGoalModel / clear    same for goal
+ *   - setCachedRecapModel / clear
+ *   - setCachedGoalModel / clear
  *
  * Notice (v5):
- *   - setNotice(text, durationMs)   transient title-right toast, NOT persisted
- *   - clearNotice()                 explicit clear (animation tick on expiry)
+ *   - setNotice / clearNotice
  *
- * Each helper mutates the module-level cell and returns void; the widget
- * renders straight from getState() so the next render sees the change.
+ * All helpers take sessionId as the first argument and operate only on
+ * that session's state cell. No cross-session bleed.
  */
 
 import {
@@ -29,39 +31,68 @@ import {
 	type StatusState,
 } from "./state.js";
 
-let state: StatusState = { ...EMPTY_STATE, history: [] };
+const sessions = new Map<string, StatusState>();
 
-export function getState(): StatusState {
-	return state;
+/** Which session's UI is currently mounted (the widget renders this one). */
+let activeSessionId: string | undefined;
+
+export function getActiveSessionId(): string | undefined {
+	return activeSessionId;
 }
 
-export function getGoal(): string {
-	return state.goal;
+export function setActiveSessionId(id: string): void {
+	activeSessionId = id;
 }
 
-export function getStatus(): string {
-	return state.status;
+/** Get or create a session's state cell. */
+function ensureSession(id: string): StatusState {
+	let s = sessions.get(id);
+	if (!s) {
+		s = { ...EMPTY_STATE, history: [] };
+		sessions.set(id, s);
+	}
+	return s;
 }
 
-export function getHistory(): readonly HistoryEntry[] {
-	return state.history;
+export function getState(sessionId: string): StatusState {
+	return ensureSession(sessionId);
 }
 
-export function replaceState(next: StatusState): void {
-	state = next;
+/** Get state for the currently active session. Convenience for widget render. */
+export function getActiveState(): StatusState {
+	if (!activeSessionId) return { ...EMPTY_STATE, history: [] };
+	return ensureSession(activeSessionId);
 }
 
-export function commitState(next: StatusState): void {
-	state = next;
+export function getGoal(sessionId: string): string {
+	return ensureSession(sessionId).goal;
 }
 
-/**
- * Append a new streaming entry and return its id. The recap text starts
- * empty; the widget shows the pulsating thinking-dot until the first delta
- * arrives, then swaps in live text + caret.
- */
-export function addStreamingEntry(speaker: Speaker, timestamp: number = Date.now()): number {
-	const id = state.nextId;
+export function getStatus(sessionId: string): string {
+	return ensureSession(sessionId).status;
+}
+
+export function getHistory(sessionId: string): readonly HistoryEntry[] {
+	return ensureSession(sessionId).history;
+}
+
+export function replaceState(sessionId: string, next: StatusState): void {
+	sessions.set(sessionId, next);
+}
+
+export function commitState(sessionId: string, next: StatusState): void {
+	sessions.set(sessionId, next);
+}
+
+/** Drop a session's state cell (called on session_shutdown). */
+export function dropSession(sessionId: string): void {
+	sessions.delete(sessionId);
+	if (activeSessionId === sessionId) activeSessionId = undefined;
+}
+
+export function addStreamingEntry(sessionId: string, speaker: Speaker, timestamp: number = Date.now()): number {
+	const s = ensureSession(sessionId);
+	const id = s.nextId;
 	const entry: HistoryEntry = {
 		id,
 		timestamp,
@@ -69,98 +100,87 @@ export function addStreamingEntry(speaker: Speaker, timestamp: number = Date.now
 		speaker,
 		streaming: true,
 	};
-	state = {
-		...state,
-		history: [...state.history, entry],
+	sessions.set(sessionId, {
+		...s,
+		history: [...s.history, entry],
 		nextId: id + 1,
-	};
+	});
 	return id;
 }
 
-/** Replace the running text on a streaming entry. No-op if the id is gone. */
-export function updateEntryText(id: number, running: string): void {
-	const idx = state.history.findIndex((h) => h.id === id);
+export function updateEntryText(sessionId: string, id: number, running: string): void {
+	const s = ensureSession(sessionId);
+	const idx = s.history.findIndex((h) => h.id === id);
 	if (idx < 0) return;
-	const next = state.history.slice();
+	const next = s.history.slice();
 	next[idx] = { ...next[idx]!, recap: running };
-	state = { ...state, history: next };
+	sessions.set(sessionId, { ...s, history: next });
 }
 
-/**
- * Finalize a streaming entry: clear the flag, swap in the cleaned recap,
- * bump status / lastModel for the surface. No-op if the id is gone.
- */
-export function finalizeEntry(id: number, recap: string, modelId?: string): void {
-	const idx = state.history.findIndex((h) => h.id === id);
+export function finalizeEntry(sessionId: string, id: number, recap: string, modelId?: string): void {
+	const s = ensureSession(sessionId);
+	const idx = s.history.findIndex((h) => h.id === id);
 	if (idx < 0) return;
-	const next = state.history.slice();
+	const next = s.history.slice();
 	next[idx] = { ...next[idx]!, recap, streaming: false };
-	state = {
-		...state,
+	sessions.set(sessionId, {
+		...s,
 		history: next,
 		status: recap,
-		lastModel: modelId ?? state.lastModel,
-	};
+		lastModel: modelId ?? s.lastModel,
+	});
 }
 
-/** Drop a streaming entry that never produced any text (e.g. the LLM call
- *  errored out). Keeps the history clean instead of leaving a zombie row. */
-export function removeEntry(id: number): void {
-	const next = state.history.filter((h) => h.id !== id);
-	if (next.length === state.history.length) return;
-	state = { ...state, history: next };
+export function removeEntry(sessionId: string, id: number): void {
+	const s = ensureSession(sessionId);
+	const next = s.history.filter((h) => h.id !== id);
+	if (next.length === s.history.length) return;
+	sessions.set(sessionId, { ...s, history: next });
 }
 
-/** Seed lastModel only when it's currently empty. Used at session_start to
- *  avoid a blank title-right slot in the window between toast expiry (2.5s)
- *  and the first finalizeEntry. The real winner from finalizeEntry overwrites
- *  this on the first successful recap. No-op when lastModel is already set. */
-export function seedLastModel(id: string): void {
-	if (state.lastModel) return;
-	state = { ...state, lastModel: id };
+export function seedLastModel(sessionId: string, id: string): void {
+	const s = ensureSession(sessionId);
+	if (s.lastModel) return;
+	sessions.set(sessionId, { ...s, lastModel: id });
 }
 
-/** Pin a model id as the next-attempt winner for recap streams. Stamps cachedAt
- *  to now() so the 24h TTL window starts from this success. */
-export function setCachedRecapModel(id: string): void {
+export function setCachedRecapModel(sessionId: string, id: string): void {
+	const s = ensureSession(sessionId);
 	const next: CachedModel = { id, cachedAt: Date.now() };
-	state = { ...state, cachedRecapModel: next };
+	sessions.set(sessionId, { ...s, cachedRecapModel: next });
 }
 
-/** Drop the recap cached winner. Used when the cached id failed this turn,
- *  forcing the next stream to re-walk the chain. */
-export function clearCachedRecapModel(): void {
-	if (!state.cachedRecapModel) return;
-	state = { ...state, cachedRecapModel: undefined };
+export function clearCachedRecapModel(sessionId: string): void {
+	const s = ensureSession(sessionId);
+	if (!s.cachedRecapModel) return;
+	sessions.set(sessionId, { ...s, cachedRecapModel: undefined });
 }
 
-/** Pin a model id as the next-attempt winner for goal streams. Idempotent. */
-export function setCachedGoalModel(id: string): void {
+export function setCachedGoalModel(sessionId: string, id: string): void {
+	const s = ensureSession(sessionId);
 	const next: CachedModel = { id, cachedAt: Date.now() };
-	state = { ...state, cachedGoalModel: next };
+	sessions.set(sessionId, { ...s, cachedGoalModel: next });
 }
 
-export function clearCachedGoalModel(): void {
-	if (!state.cachedGoalModel) return;
-	state = { ...state, cachedGoalModel: undefined };
+export function clearCachedGoalModel(sessionId: string): void {
+	const s = ensureSession(sessionId);
+	if (!s.cachedGoalModel) return;
+	sessions.set(sessionId, { ...s, cachedGoalModel: undefined });
 }
 
-/**
- * Set a transient title-right toast for `durationMs` from now. The widget
- * polls expiry on each animation tick; once expired, the renderer shows
- * the model tag again. Notice is intentionally NOT persisted to disk -- it's
- * a soft suggestion that should not survive the session.
- */
-export function setNotice(text: string, durationMs: number): void {
+export function setNotice(sessionId: string, text: string, durationMs: number): void {
+	const s = ensureSession(sessionId);
 	const next: StatusNotice = { text, expiresAt: Date.now() + durationMs };
-	state = { ...state, notice: next };
+	sessions.set(sessionId, { ...s, notice: next });
 }
 
-export function clearNotice(): void {
-	if (!state.notice) return;
-	state = { ...state, notice: undefined };
+export function clearNotice(sessionId: string): void {
+	const s = ensureSession(sessionId);
+	if (!s.notice) return;
+	sessions.set(sessionId, { ...s, notice: undefined });
 }
 
 export function __resetState(): void {
-	state = { ...EMPTY_STATE, history: [] };
+	sessions.clear();
+	activeSessionId = undefined;
 }

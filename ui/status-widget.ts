@@ -40,7 +40,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { truncateToWidth, visibleWidth, matchesKey, Key } from "@earendil-works/pi-tui";
-import { clearNotice, getState } from "../state/store.js";
+import { clearNotice, getActiveState, getActiveSessionId } from "../state/store.js";
 import type { HistoryEntry, Speaker } from "../state/state.js";
 import { formatDate } from "../util/date.js";
 import { fgAnsi, parseHex, rgbLerp, RESET, type RGB, titleColor, newestColor, textColor, colorText, isLightBg } from "./anim.js";
@@ -167,7 +167,7 @@ export class StatusWidget implements Component {
 			// message. During animation ticks, update() is never called directly
 			// — only requestRender() from the timer — so this doesn't reintroduce
 			// the per-tick re-render that caused image flashing.
-			const currentLen = getState().history.length;
+			const currentLen = getActiveState().history.length;
 			if (currentLen === this.lastHistoryLength) {
 				this.decoyTick = (this.decoyTick + 1) % 8;
 			}
@@ -179,7 +179,7 @@ export class StatusWidget implements Component {
 	/** Bound to the ctrl+shift+r shortcut. Toggles focus. Snap, never animate. */
 	toggleFocus(): void {
 		if (!this.tui) return;
-		const history = getState().history;
+		const history = getActiveState().history;
 		if (!this.focused) {
 			if (history.length === 0) return;
 			this.focused = true;
@@ -222,7 +222,7 @@ export class StatusWidget implements Component {
 		// payload between them. Below that we just emit nothing.
 		if (width < 4) return [];
 
-		const state = getState();
+		const state = getActiveState();
 		const { goal, history } = state;
 		const now = Date.now();
 
@@ -230,7 +230,8 @@ export class StatusWidget implements Component {
 		// disappears on the very tick after expiresAt without leaving a stale
 		// label flashing for one frame.
 		if (state.notice && state.notice.expiresAt <= now) {
-			clearNotice();
+			const activeId = getActiveSessionId();
+			if (activeId) clearNotice(activeId);
 		}
 
 		this.reconcileAnim(history, now);
@@ -299,7 +300,7 @@ export class StatusWidget implements Component {
 
 	handleInput(data: string): void {
 		if (!this.focused) return;
-		const total = getState().history.length;
+		const total = getActiveState().history.length;
 		if (total === 0) {
 			this.focused = false;
 			this.tui?.setFocus(null);
@@ -401,7 +402,7 @@ export class StatusWidget implements Component {
 			if (anim.finalizedAt === undefined) return true; // streaming
 			if ((now - anim.finalizedAt) < SETTLE_MS) return true; // mid-settle
 		}
-		const notice = getState().notice;
+		const notice = getActiveState().notice;
 		if (notice && notice.expiresAt > now) return true;
 		return false;
 	}
