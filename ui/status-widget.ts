@@ -96,6 +96,7 @@ interface EntryAnim {
 export class StatusWidget implements Component {
 	private uiCtx: ExtensionUIContext | undefined;
 	private widgetRegistered = false;
+	private firstDeltaAfterRegistration = true;
 	private tui: TUI | undefined;
 	private currentTheme: Theme | undefined;
 	private disposed = false;
@@ -168,7 +169,17 @@ export class StatusWidget implements Component {
 			);
 			this.widgetRegistered = true;
 		} else {
-			this.tui?.requestRender();
+			// On the very first delta after registration, force a full redraw
+			// to clear pi-tui's frame cache. This prevents the stale initial
+			// frame (empty widget) from remaining visible as a ghost top border
+			// when content arrives. Subsequent updates use normal incremental
+			// rendering for performance.
+			if (this.firstDeltaAfterRegistration) {
+				this.firstDeltaAfterRegistration = false;
+				this.tui?.requestRender(true);
+			} else {
+				this.tui?.requestRender();
+			}
 		}
 		this.ensureAnimTimer();
 	}

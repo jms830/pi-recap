@@ -347,18 +347,26 @@ async function runOneAttempt(
 	let finalMessage: AssistantMessage | undefined;
 
 	const drain = async (): Promise<void> => {
-		const events = stream(
-			model,
-			{ messages: userMessages, systemPrompt },
-			{
-				apiKey,
-				headers,
-				maxTokens: 256,
-				temperature: 0,
-				...thinkingOffOpts(model),
-			},
-		);
-		for await (const event of events) {
+		// Suppress @google/genai console.warn / console.debug that fire on
+		// Vertex client creation ("API key will take precedence…"). These
+		// warnings corrupt the TUI frame when they land in stderr.
+		const origWarn = console.warn;
+		const origDebug = console.debug;
+		console.warn = () => {};
+		console.debug = () => {};
+		try {
+			const events = stream(
+				model,
+				{ messages: userMessages, systemPrompt },
+				{
+					apiKey,
+					headers,
+					maxTokens: 256,
+					temperature: 0,
+					...thinkingOffOpts(model),
+				},
+			);
+			for await (const event of events) {
 			logTrace(`${model.id} event=${event.type}`);
 			if (event.type === "text_delta") {
 				sawTextDelta = true;
@@ -379,16 +387,20 @@ async function runOneAttempt(
 				// Reasoning-tagged events (thinking_delta / thinking_end) on a
 				// model that should have honoured thinking-off. Tracked so we
 				// can blacklist "empty + reasoning" patterns specifically.
-				sawReasoning = true;
+					sawReasoning = true;
+				}
 			}
-		}
 
-		if (!running && finalMessage) {
-			const fromMsg = extractTextFromMessage(finalMessage);
-			if (fromMsg) {
-				running = fromMsg;
-				onDelta?.(running);
+			if (!running && finalMessage) {
+				const fromMsg = extractTextFromMessage(finalMessage);
+				if (fromMsg) {
+					running = fromMsg;
+					onDelta?.(running);
+				}
 			}
+		} finally {
+			console.warn = origWarn;
+			console.debug = origDebug;
 		}
 	};
 
