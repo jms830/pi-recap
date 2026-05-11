@@ -4,7 +4,11 @@
 
 **Never scroll back to remember what you were doing.**
 
+An always-visible session recap panel for [pi coding agent](https://github.com/badlogic/pi-mono) showing the current goal and last few conversation turns with live streaming updates.
+
 ![pi-recap screenshot](_tmp/screenshot.png)
+
+*Banner and screenshot images created with [pi-banana](https://github.com/fornace/pi-banana).*
 
 ## Features
 
@@ -101,6 +105,15 @@ npx tsx test-recap-models.ts     # test model picker chain against real registry
 ## License
 
 MIT
+
+## From the same author
+
+By [Francesco Frapporti](https://fornace.it) at [Fornace](https://fornace.it).
+
+- **[pi-bench](https://github.com/fornace/pi-bench)** — LLM benchmark toolkit for pi. Probes every model to find the fastest and cheapest. This extension uses pi-bench data to pick summarization models.
+- **[pi-banana](https://github.com/fornace/pi-banana)** — Generate and edit images inside pi using Google Nano Banana. The banner and screenshot images above were created with pi-banana.
+- **[pi-alibaba-models](https://github.com/fornace/pi-alibaba-models)** — Complete Alibaba provider for pi: Qwen, DeepSeek, Kimi, GLM, MiniMax with native thinking levels.
+- **[pi-notte-theme](https://github.com/fornace/pi-notte-theme)** — Notte: a true-dark pi theme where darkness has color and text glows like terminal phosphor.
 
 ## Changelog
 
