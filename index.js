@@ -699,30 +699,38 @@ export default function (pi) {
             if (choice === blLabel) {
                 const blCurrent = loadBlacklist();
                 if (blCurrent.entries.length === 0) {
-                    const blAction = await ctx.ui.select("Blacklist is empty", ["seed defaults"]);
-                    if (blAction === "seed defaults") {
+                    const blAction = await ctx.ui.select("Blacklist is empty", ["🔄 Seed defaults", "➕ Add entry"]);
+                    if (blAction === "🔄 Seed defaults") {
                         seedBlacklist();
                         const after = loadBlacklist();
                         ctx.ui.notify(`Blacklist seeded. ${after.entries.length} entries.`, "info");
                     }
+                    else if (blAction === "➕ Add entry") {
+                        const id = await ctx.ui.input("Model ID to blacklist");
+                        if (!id?.trim())
+                            return;
+                        const reason = await ctx.ui.input("Reason (optional)", "user added");
+                        addToBlacklist(id.trim(), (reason || "user added").trim(), "user");
+                        ctx.ui.notify(`Blacklisted ${id.trim()}.`, "info");
+                    }
                     return;
                 }
                 const blOptions = [
-                    "view entries",
-                    "add entry",
-                    "remove entry",
-                    "reset",
-                    "re-seed defaults",
+                    "👀 View entries",
+                    "➕ Add entry",
+                    "➖ Remove entry",
+                    "🔄 Re-seed defaults",
+                    "🗑️ Clear all",
                 ];
-                const blChoice = await ctx.ui.select("Blacklist", blOptions);
+                const blChoice = await ctx.ui.select("Manage Blacklist", blOptions);
                 if (!blChoice)
                     return;
-                if (blChoice === "view entries") {
+                if (blChoice === "👀 View entries") {
                     const lines = blCurrent.entries.map((e) => `${e.id} — ${e.reason} [${e.addedBy}]`);
                     ctx.ui.notify(lines.join("\n"), "info");
                     return;
                 }
-                if (blChoice === "add entry") {
+                if (blChoice === "➕ Add entry") {
                     const id = await ctx.ui.input("Model ID to blacklist");
                     if (!id?.trim())
                         return;
@@ -731,7 +739,7 @@ export default function (pi) {
                     ctx.ui.notify(`Blacklisted ${id.trim()}.`, "info");
                     return;
                 }
-                if (blChoice === "remove entry") {
+                if (blChoice === "➖ Remove entry") {
                     const blForRemove = loadBlacklist();
                     const ids = blForRemove.entries.map((e) => e.id);
                     const pick = await ctx.ui.select("Remove from blacklist", ids);
@@ -741,12 +749,12 @@ export default function (pi) {
                     ctx.ui.notify(removed ? `Removed ${pick}.` : `${pick} not found.`, "info");
                     return;
                 }
-                if (blChoice === "reset") {
+                if (blChoice === "🗑️ Clear all") {
                     resetBlacklist();
                     ctx.ui.notify("Blacklist reset.", "info");
                     return;
                 }
-                if (blChoice === "re-seed defaults") {
+                if (blChoice === "🔄 Re-seed defaults") {
                     seedBlacklist();
                     const after = loadBlacklist();
                     ctx.ui.notify(`Blacklist re-seeded. ${after.entries.length} entries.`, "info");

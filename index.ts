@@ -775,11 +775,17 @@ export default function (pi: ExtensionAPI) {
 			if (choice === blLabel) {
 				const blCurrent = loadBlacklist();
 				if (blCurrent.entries.length === 0) {
-					const blAction = await ctx.ui.select("Blacklist is empty", ["seed defaults"]);
-					if (blAction === "seed defaults") {
+					const blAction = await ctx.ui.select("Blacklist is empty", ["🔄 Seed defaults", "➕ Add entry"]);
+					if (blAction === "🔄 Seed defaults") {
 						seedBlacklist();
 						const after = loadBlacklist();
 						ctx.ui.notify(`Blacklist seeded. ${after.entries.length} entries.`, "info");
+					} else if (blAction === "➕ Add entry") {
+						const id = await ctx.ui.input("Model ID to blacklist");
+						if (!id?.trim()) return;
+						const reason = await ctx.ui.input("Reason (optional)", "user added");
+						addToBlacklist(id.trim(), (reason || "user added").trim(), "user");
+						ctx.ui.notify(`Blacklisted ${id.trim()}.`, "info");
 					}
 					return;
 				}
