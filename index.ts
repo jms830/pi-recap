@@ -74,6 +74,7 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { Container, SelectList, Spacer, Text } from "@earendil-works/pi-tui";
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -751,13 +752,57 @@ export default function (pi: ExtensionAPI) {
 					benchLines.push(...pickOptions);
 					statusWidget?.setBenchProgress(benchLines);
 
-					// Select dialog — shows styled rows, scrolls natively.
-					const picked = await ctx.ui.select(`${bold("Pick recap model")} ${dim(`(${allRows.length} tested)`)}`, pickOptions);
+					// Select dialog — shows styled rows, scrolls natively using pi-tui SelectList.
+					const picked = await ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) => {
+						class CustomSelect extends Container {
+							private list: SelectList;
+							constructor() {
+								super();
+								const w = tui.terminal.columns > 80 ? 80 : tui.terminal.columns;
+								this.addChild(new Text(theme.fg("dim", "─".repeat(w)), 1, 0));
+								this.addChild(new Spacer(1));
+								this.addChild(new Text(theme.fg("accent", theme.bold(`Pick recap model `)) + theme.fg("dim", `(${allRows.length} tested)`), 1, 0));
+								this.addChild(new Spacer(1));
+								this.addChild(new Text(colHeader, 1, 0));
+
+								const items = pickOptions.map((opt, i) => {
+									const v = allRows[i]!.split(",");
+									const rawId = v[idxId]!;
+									return { value: rawId, label: opt };
+								});
+								
+								this.list = new SelectList(items, 10, {
+									selectedPrefix: () => theme.fg("accent", "→ "),
+									selectedText: (t) => t, // Keep original ANSI styling
+									description: (t) => theme.fg("dim", t),
+									scrollInfo: (t) => theme.fg("dim", t),
+									noMatch: (t) => theme.fg("error", t)
+								});
+								this.addChild(this.list);
+
+								this.addChild(new Spacer(1));
+								this.addChild(new Text("↑↓ navigate  Enter select  Esc cancel", 1, 0));
+								this.addChild(new Spacer(1));
+								this.addChild(new Text(theme.fg("dim", "─".repeat(w)), 1, 0));
+
+								this.list.onSelect = (item) => done(item.value);
+								this.list.onCancel = () => done(undefined);
+							}
+
+							handleInput(keyData: string) {
+								if (keybindings.matches(keyData, "tui.select.cancel")) {
+									done(undefined);
+									return;
+								}
+								this.list.handleInput(keyData);
+							}
+						}
+						return new CustomSelect();
+					});
 					statusWidget?.setBenchProgress(undefined);
 					if (!picked) return;
-					// Extract model id: strip ANSI, then split on whitespace.
-					const stripped = picked.replace(/\x1b\[[0-9;]*m/g, "").replace(/👑\s*/, "").trim();
-					const modelId = stripped.split(/\s+/)[0]!;
+					
+					const modelId = picked;
 					commitState(sessionId, { ...getState(sessionId), modelOverride: modelId });
 					persistState(sessionId, pi);
 					statusWidget?.update();
