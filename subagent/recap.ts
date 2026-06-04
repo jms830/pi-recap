@@ -24,6 +24,7 @@ import type { Api, AssistantMessage, Message, Model } from "@earendil-works/pi-a
 import { stream } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { findFastModelChain, thinkingOffOpts } from "./picker.js";
+import { resolveModelAuth } from "./auth.js";
 import { addToBlacklist } from "../state/blacklist.js";
 import type { CachedModel } from "../state/state.js";
 import { logDebug, logError, logTrace } from "../util/log.js";
@@ -40,7 +41,7 @@ const ATTEMPT_TIMEOUT_MS = 15000;
 export async function listAvailableFastModels(registry: ModelRegistry): Promise<string[]> {
 	const available = registry.getAvailable();
 	const auths = await Promise.all(
-		available.map((model) => registry.getApiKeyAndHeaders(model).then((auth) => ({ model, auth }))),
+		available.map((model) => resolveModelAuth(registry, model).then((auth) => ({ model, auth }))),
 	);
 	return auths.filter(({ auth }) => auth.ok && auth.apiKey).map(({ model }) => model.id);
 }
@@ -271,7 +272,7 @@ async function streamRecap(
 		const model = chain[i];
 		if (!model) continue;
 		attempted.push(model.id);
-		const auth = await registry.getApiKeyAndHeaders(model);
+		const auth = await resolveModelAuth(registry, model);
 		if (!auth.ok || !auth.apiKey) {
 			logDebug(`auth not ready for ${model.id}, skipping`);
 			continue;

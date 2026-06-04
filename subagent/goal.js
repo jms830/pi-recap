@@ -17,6 +17,7 @@
 import { stream } from "@earendil-works/pi-ai";
 import { extractConversationContext, buildHistory, extractTextFromMessage } from "./recap.js";
 import { findFastModelChain, thinkingOffOpts } from "./picker.js";
+import { resolveModelAuth } from "./auth.js";
 import { addToBlacklist } from "../state/blacklist.js";
 import { logDebug, logError, logTrace } from "../util/log.js";
 const ATTEMPT_TIMEOUT_MS = 15000;
@@ -82,7 +83,7 @@ async function streamOnce(registry, systemPrompt, userMessages, options) {
         if (!model)
             continue;
         attempted.push(model.id);
-        const auth = await registry.getApiKeyAndHeaders(model);
+        const auth = await resolveModelAuth(registry, model);
         if (!auth.ok || !auth.apiKey) {
             logDebug(`goal: auth not ready for ${model.id}, skipping`);
             continue;

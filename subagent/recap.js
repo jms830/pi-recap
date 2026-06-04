@@ -21,6 +21,7 @@
  */
 import { stream } from "@earendil-works/pi-ai";
 import { findFastModelChain, thinkingOffOpts } from "./picker.js";
+import { resolveModelAuth } from "./auth.js";
 import { addToBlacklist } from "../state/blacklist.js";
 import { logDebug, logError, logTrace } from "../util/log.js";
 /** Per-attempt timeout. Anything slower than this on a non-sacred candidate
@@ -33,7 +34,7 @@ const ATTEMPT_TIMEOUT_MS = 15000;
  */
 export async function listAvailableFastModels(registry) {
     const available = registry.getAvailable();
-    const auths = await Promise.all(available.map((model) => registry.getApiKeyAndHeaders(model).then((auth) => ({ model, auth }))));
+    const auths = await Promise.all(available.map((model) => resolveModelAuth(registry, model).then((auth) => ({ model, auth }))));
     return auths.filter(({ auth }) => auth.ok && auth.apiKey).map(({ model }) => model.id);
 }
 /**
@@ -206,7 +207,7 @@ async function streamRecap(registry, systemPrompt, userMessages, options) {
         if (!model)
             continue;
         attempted.push(model.id);
-        const auth = await registry.getApiKeyAndHeaders(model);
+        const auth = await resolveModelAuth(registry, model);
         if (!auth.ok || !auth.apiKey) {
             logDebug(`auth not ready for ${model.id}, skipping`);
             continue;

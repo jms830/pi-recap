@@ -20,6 +20,7 @@ import { stream } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { extractConversationContext, buildHistory, extractTextFromMessage } from "./recap.js";
 import { findFastModelChain, thinkingOffOpts } from "./picker.js";
+import { resolveModelAuth } from "./auth.js";
 import { addToBlacklist } from "../state/blacklist.js";
 import type { CachedModel } from "../state/state.js";
 import { logDebug, logError, logTrace } from "../util/log.js";
@@ -125,7 +126,7 @@ async function streamOnce(
 		const model = chain[i];
 		if (!model) continue;
 		attempted.push(model.id);
-		const auth = await registry.getApiKeyAndHeaders(model);
+		const auth = await resolveModelAuth(registry, model);
 		if (!auth.ok || !auth.apiKey) {
 			logDebug(`goal: auth not ready for ${model.id}, skipping`);
 			continue;
