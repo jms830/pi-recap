@@ -477,6 +477,47 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	// ── Slash command: /recap-model - direct model override ───────
+
+	pi.registerCommand("recap-model", {
+		description: "Set recap model directly, or open picker with no args",
+		handler: async (args, ctx) => {
+			const sessionId = sid(ctx);
+			const requested = args.trim();
+			if (["auto", "clear", "reset", "off"].includes(requested.toLowerCase())) {
+				commitState(sessionId, { ...getState(sessionId), modelOverride: undefined });
+				setGlobalModelOverride(undefined);
+				persistState(sessionId, pi);
+				statusWidget?.update();
+				ctx.ui.notify("Recap model reset globally to auto-pick.", "info");
+				return;
+			}
+
+			let picked = requested;
+			if (!picked) {
+				const available = await listAvailableFastModels(ctx.modelRegistry);
+				const fastList = available.filter((id) => {
+					const lower = id.toLowerCase();
+					const hasMini = lower.includes("mini") && !lower.includes("gemini");
+					return lower.includes("flash") || hasMini || lower.includes("haiku")
+						|| lower.includes("turbo") || lower.includes("lite");
+				});
+				if (fastList.length === 0) {
+					ctx.ui.notify("No fast models with valid keys available.", "warning");
+					return;
+				}
+				picked = (await ctx.ui.select("Recap model", fastList)) || "";
+			}
+			if (!picked) return;
+
+			commitState(sessionId, { ...getState(sessionId), modelOverride: picked });
+			setGlobalModelOverride(picked);
+			persistState(sessionId, pi);
+			statusWidget?.update();
+			ctx.ui.notify(`Recap model set globally: ${picked}`, "info");
+		},
+	});
+
 	// ── Slash command: /recap - unified interactive menu ──────────
 
 	pi.registerCommand("recap", {
