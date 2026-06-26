@@ -38,11 +38,15 @@ import { clearNotice, getActiveState, getActiveSessionId } from "../state/store.
 import { formatDate } from "../util/date.js";
 import { fgAnsi, parseHex, rgbLerp, RESET, newestColor, textColor, colorText } from "./anim.js";
 const WIDGET_KEY = "recap";
-// Inside tmux/screen, pi's renderer never destructive-clears, so an
-// every-render decoy bump forces all rows below the widget to repaint each
-// tick and commits mid-state frames into scrollback (duplicated cards,
-// progressive tool-row fragments). In multiplexers, bump only on height
-// change; external bumpDecoy() calls still cover vertical shifts.
+/** Inside tmux/screen, pi's renderer never destructive-clears and never
+ *  rewraps committed history, so a decoy that changes EVERY render forces all
+ *  rows below the widget to repaint each tick (80 ms) and pushes mid-state
+ *  frames into the pane's scrollback — duplicated status cards and
+ *  progressive tool-row fragments. In multiplexers we only bump the decoy
+ *  when the card height actually changes; external bumpDecoy() calls
+ *  (Enter / input events) still cover vertical shifts. Worst case is an
+ *  occasional in-viewport border fragment, cleared on the next height
+ *  change — far better than continuous scrollback corruption. */
 export const IN_MULTIPLEXER = !!process.env.TMUX ||
     (process.env.TERM ?? "").startsWith("tmux") ||
     (process.env.TERM ?? "").startsWith("screen");
