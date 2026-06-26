@@ -3,3 +3,4 @@ _tmp/
 state/blacklist.json
 generated/
 state/config.json
+.omc/

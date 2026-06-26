@@ -5,6 +5,10 @@ import { logError } from "../util/log.js";
 
 export interface GlobalConfig {
 	modelOverride?: string;
+	/** Defaults to true. False keeps the widget goal but stops renaming the host session. */
+	autoRenameSession?: boolean;
+	/** Defaults to false. True restricts automatic recap/goal fallback chains to free models. */
+	freeOnlyAutoPick?: boolean;
 }
 
 function resolveConfigPath(): string {
@@ -48,10 +52,7 @@ export function loadConfig(): GlobalConfig {
 	return cache;
 }
 
-export function setGlobalModelOverride(id: string | undefined): void {
-	const config = loadConfig();
-	if (config.modelOverride === id) return;
-	config.modelOverride = id;
+function writeConfig(config: GlobalConfig): void {
 	ensureDir();
 	try {
 		writeFileSync(CONFIG_PATH, JSON.stringify(config, null, "\t") + "\n", "utf8");
@@ -60,6 +61,35 @@ export function setGlobalModelOverride(id: string | undefined): void {
 	}
 }
 
+export function setGlobalModelOverride(id: string | undefined): void {
+	const config = loadConfig();
+	if (config.modelOverride === id) return;
+	config.modelOverride = id;
+	writeConfig(config);
+}
+
 export function getGlobalModelOverride(): string | undefined {
 	return loadConfig().modelOverride;
+}
+
+export function getAutoRenameSession(): boolean {
+	return loadConfig().autoRenameSession !== false;
+}
+
+export function setAutoRenameSession(enabled: boolean): void {
+	const config = loadConfig();
+	if (getAutoRenameSession() === enabled) return;
+	config.autoRenameSession = enabled ? undefined : false;
+	writeConfig(config);
+}
+
+export function getFreeOnlyAutoPick(): boolean {
+	return loadConfig().freeOnlyAutoPick === true;
+}
+
+export function setFreeOnlyAutoPick(enabled: boolean): void {
+	const config = loadConfig();
+	if (getFreeOnlyAutoPick() === enabled) return;
+	config.freeOnlyAutoPick = enabled ? true : undefined;
+	writeConfig(config);
 }

@@ -41,11 +41,7 @@ export function loadConfig() {
     }
     return cache;
 }
-export function setGlobalModelOverride(id) {
-    const config = loadConfig();
-    if (config.modelOverride === id)
-        return;
-    config.modelOverride = id;
+function writeConfig(config) {
     ensureDir();
     try {
         writeFileSync(CONFIG_PATH, JSON.stringify(config, null, "\t") + "\n", "utf8");
@@ -54,6 +50,33 @@ export function setGlobalModelOverride(id) {
         logError("config.json write failed", err);
     }
 }
+export function setGlobalModelOverride(id) {
+    const config = loadConfig();
+    if (config.modelOverride === id)
+        return;
+    config.modelOverride = id;
+    writeConfig(config);
+}
 export function getGlobalModelOverride() {
     return loadConfig().modelOverride;
+}
+export function getAutoRenameSession() {
+    return loadConfig().autoRenameSession !== false;
+}
+export function setAutoRenameSession(enabled) {
+    const config = loadConfig();
+    if (getAutoRenameSession() === enabled)
+        return;
+    config.autoRenameSession = enabled ? undefined : false;
+    writeConfig(config);
+}
+export function getFreeOnlyAutoPick() {
+    return loadConfig().freeOnlyAutoPick === true;
+}
+export function setFreeOnlyAutoPick(enabled) {
+    const config = loadConfig();
+    if (getFreeOnlyAutoPick() === enabled)
+        return;
+    config.freeOnlyAutoPick = enabled ? true : undefined;
+    writeConfig(config);
 }

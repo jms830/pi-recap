@@ -687,10 +687,11 @@ export class StatusWidget implements Component {
 	 * each side. The interior payload visible width is expected to be at most
 	 * (width - 4); this method right-pads with spaces.
 	 */
-	private padRow(theme: Theme, width: number, interior: string): string {
+	private padRow(theme: Theme, width: number | string, interior: string): string {
 		const borderColor = (s: string) => theme.fg("border", s);
-		const innerWidth = Math.max(0, width - 4);
-		const truncated = truncateToWidth(interior, innerWidth, "…");
+		const rowWidth = Math.floor(Number(width));
+		const innerWidth = Math.max(0, Number.isFinite(rowWidth) ? rowWidth - 4 : 0);
+		const truncated = truncateToWidth(interior, innerWidth);
 		const vis = visibleWidth(truncated);
 		const padRight = " ".repeat(Math.max(0, innerWidth - vis));
 		return borderColor(BORDER.v) + " " + truncated + padRight + " " + borderColor(BORDER.v);

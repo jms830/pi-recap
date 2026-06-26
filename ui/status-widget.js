@@ -623,8 +623,9 @@ export class StatusWidget {
      */
     padRow(theme, width, interior) {
         const borderColor = (s) => theme.fg("border", s);
-        const innerWidth = Math.max(0, width - 4);
-        const truncated = truncateToWidth(interior, innerWidth, "…");
+        const rowWidth = Math.floor(Number(width));
+        const innerWidth = Math.max(0, Number.isFinite(rowWidth) ? rowWidth - 4 : 0);
+        const truncated = truncateToWidth(interior, innerWidth);
         const vis = visibleWidth(truncated);
         const padRight = " ".repeat(Math.max(0, innerWidth - vis));
         return borderColor(BORDER.v) + " " + truncated + padRight + " " + borderColor(BORDER.v);
