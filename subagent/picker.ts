@@ -38,7 +38,11 @@ export { CURATED_CHAIN };
 export function isFreeModel(model: Model<Api>): boolean {
 	const cost = model.cost;
 	if (!cost) return false;
-	return cost.input === 0 && cost.output === 0 && cost.cacheRead === 0 && cost.cacheWrite === 0;
+	// A model with zero input+output cost is free. Cache pricing is often
+	// undefined on free tiers (e.g. OpenRouter ":free", gemini free) — treat
+	// missing cache costs as zero so they aren't wrongly excluded.
+	const zeroish = (v: number | undefined): boolean => v === undefined || v === 0;
+	return cost.input === 0 && cost.output === 0 && zeroish(cost.cacheRead) && zeroish(cost.cacheWrite);
 }
 
 export function isFastRecapModelId(id: string): boolean {
