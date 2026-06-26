@@ -2,12 +2,18 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { logError } from "../util/log.js";
 
+export type RecapMode = "full" | "footer" | "compact";
+
 export interface GlobalConfig {
 	modelOverride?: string;
 	/** Defaults to true. False keeps the widget goal but stops renaming the host session. */
 	autoRenameSession?: boolean;
 	/** Defaults to false. True restricts automatic recap/goal fallback chains to free models. */
 	freeOnlyAutoPick?: boolean;
+	/** Legacy boolean light switch; migrated to recapMode on next write. */
+	lightMode?: boolean;
+	/** Recap display surface: full card (default), terse footer marker, or compact one-line widget. */
+	recapMode?: RecapMode;
 }
 
 function resolveConfigPath(): string {
@@ -102,4 +108,26 @@ export function setFreeOnlyAutoPick(enabled: boolean): void {
 	if (getFreeOnlyAutoPick() === enabled) return;
 	config.freeOnlyAutoPick = enabled ? true : undefined;
 	writeConfig(config);
+}
+
+export function setGlobalRecapMode(mode: RecapMode): void {
+	const config = loadConfig();
+	if (config.recapMode === mode && config.lightMode === undefined) return;
+	config.recapMode = mode;
+	if ("lightMode" in config) delete config.lightMode; // drop migrated legacy key
+	writeConfig(config);
+}
+
+export function getGlobalRecapMode(): RecapMode {
+	const config = loadConfig();
+	if (config.recapMode === "full" || config.recapMode === "footer" || config.recapMode === "compact") {
+		return config.recapMode;
+	}
+	if (config.lightMode === true) return "footer"; // legacy migration default
+	return "full";
+}
+
+/** True when any non-full (light) display surface is active. */
+export function getGlobalLightMode(): boolean {
+	return getGlobalRecapMode() !== "full";
 }

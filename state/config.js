@@ -90,3 +90,25 @@ export function setFreeOnlyAutoPick(enabled) {
     config.freeOnlyAutoPick = enabled ? true : undefined;
     writeConfig(config);
 }
+export function setGlobalRecapMode(mode) {
+    const config = loadConfig();
+    if (config.recapMode === mode && config.lightMode === undefined)
+        return;
+    config.recapMode = mode;
+    if ("lightMode" in config)
+        delete config.lightMode; // drop migrated legacy key
+    writeConfig(config);
+}
+export function getGlobalRecapMode() {
+    const config = loadConfig();
+    if (config.recapMode === "full" || config.recapMode === "footer" || config.recapMode === "compact") {
+        return config.recapMode;
+    }
+    if (config.lightMode === true)
+        return "footer"; // legacy migration default
+    return "full";
+}
+/** True when any non-full (light) display surface is active. */
+export function getGlobalLightMode() {
+    return getGlobalRecapMode() !== "full";
+}

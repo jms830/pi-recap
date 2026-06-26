@@ -56,7 +56,8 @@ import {
 	updateEntryText,
 } from "./state/store.js";
 import { replayFromBranch } from "./state/replay.js";
-import { getAutoRenameSession, getFreeOnlyAutoPick, getGlobalModelOverride, setAutoRenameSession, setFreeOnlyAutoPick, setGlobalModelOverride } from "./state/config.js";
+import type { RecapMode } from "./state/config.js";
+import { getAutoRenameSession, getFreeOnlyAutoPick, getGlobalLightMode, getGlobalModelOverride, getGlobalRecapMode, setAutoRenameSession, setFreeOnlyAutoPick, setGlobalModelOverride, setGlobalRecapMode } from "./state/config.js";
 import { StatusWidget, IN_MULTIPLEXER } from "./ui/status-widget.js";
 import {
 	generateUserRecap,
@@ -212,6 +213,66 @@ function fireSessionStartNotice(
 	seedLastModel(sessionId, pickedId);
 }
 
+/** setStatus key for the light-mode footer entry. */
+const LIGHT_STATUS_KEY = "pi-recap";
+
+/** setWidget key for the compact (mode "compact") one-line recap widget.
+ *  Distinct from the full card's "recap" key so the two never collide. */
+const LIGHT_LINE_KEY = "pi-recap-line";
+
+/** Compact one-line recap text (mode "compact"): latest finalized recap,
+ *  falling back to the goal before the first recap lands. */
+function lightStatusText(sessionId: string): string | undefined {
+	const state = getState(sessionId);
+	const latest = state.status || state.history.slice().reverse().find((entry) => entry.recap.trim())?.recap.trim();
+	if (latest) return `※ Recap: ${latest}`;
+	if (state.goal) return `※ Goal: ${state.goal}`;
+	return undefined;
+}
+
+/** Terse footer marker (mode "footer"): a short goal if set, else a bare
+ *  "recap" presence flag. The full recap text lives in the terminal title. */
+function footerMarker(sessionId: string): string | undefined {
+	const state = getState(sessionId);
+	if (state.goal) return `※ ${state.goal.length > 28 ? state.goal.slice(0, 27) + "…" : state.goal}`;
+	const hasRecap = !!state.status || state.history.some((entry) => entry.recap.trim());
+	return hasRecap ? "※ recap" : undefined;
+}
+
+/** Full recap text for the terminal title (recap preferred, goal fallback). */
+function lightTitleText(sessionId: string): string | undefined {
+	const state = getState(sessionId);
+	const latest = state.status || state.history.slice().reverse().find((entry) => entry.recap.trim())?.recap.trim();
+	return latest || state.goal || undefined;
+}
+
+/** Mirror current session state onto the active light-mode surface:
+ *   - "full":    clear footer + compact line (the card owns the display).
+ *   - "footer":  terse footer marker + full recap in the terminal title.
+ *   - "compact": one-line widget above the editor + full recap in the title. */
+function syncLightMode(
+	ctx: { ui?: { setStatus?(key: string, text: string | undefined): void; setTitle?(title: string): void; setWidget?(key: string, content: string[] | undefined, options?: { placement?: "aboveEditor" | "belowEditor" }): void } } | undefined,
+	sessionId: string,
+): void {
+	if (!ctx?.ui) return;
+	const mode = getGlobalRecapMode();
+	if (mode === "full") {
+		ctx.ui.setStatus?.(LIGHT_STATUS_KEY, undefined);
+		ctx.ui.setWidget?.(LIGHT_LINE_KEY, undefined);
+		return;
+	}
+	const title = lightTitleText(sessionId);
+	if (title) ctx.ui.setTitle?.(title.slice(0, 80));
+	if (mode === "footer") {
+		ctx.ui.setWidget?.(LIGHT_LINE_KEY, undefined);
+		ctx.ui.setStatus?.(LIGHT_STATUS_KEY, footerMarker(sessionId));
+	} else {
+		ctx.ui.setStatus?.(LIGHT_STATUS_KEY, undefined);
+		const line = lightStatusText(sessionId);
+		ctx.ui.setWidget?.(LIGHT_LINE_KEY, line ? [line] : undefined, { placement: "aboveEditor" });
+	}
+}
+
 // ── Extension ─────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
@@ -239,6 +300,7 @@ export default function (pi: ExtensionAPI) {
 		setGlobalModelOverride(picked);
 		persistState(sessionId, pi);
 		statusWidget?.update();
+		syncLightMode(ctx, sessionId);
 		ctx.ui.notify(`Recap model set globally: ${picked}`, "info");
 	};
 
@@ -263,7 +325,7 @@ export default function (pi: ExtensionAPI) {
 			logError("blacklist load failed:", err);
 		}
 
-		if (ctx.hasUI) {
+		if (ctx.hasUI && !getGlobalLightMode()) {
 			statusWidget ??= new StatusWidget();
 			statusWidget.setUICtx(ctx.ui);
 			// Do NOT register the widget yet — wait for before_agent_start.
@@ -304,6 +366,12 @@ export default function (pi: ExtensionAPI) {
 		if (!state.modelOverride && !state.lastModel) {
 			statusWidget?.setSetupNeeded(true);
 		}
+
+		if (ctx.hasUI && getGlobalLightMode()) {
+			statusWidget?.dispose();
+			statusWidget = undefined;
+		}
+		syncLightMode(ctx, sessionId);
 	});
 
 	pi.on("session_compact", async (_event, ctx) => {
@@ -311,6 +379,7 @@ export default function (pi: ExtensionAPI) {
 		setActiveSessionId(sessionId);
 		replaceState(sessionId, replayFromBranch(ctx));
 		statusWidget?.update();
+		syncLightMode(ctx, sessionId);
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
@@ -318,11 +387,16 @@ export default function (pi: ExtensionAPI) {
 		setActiveSessionId(sessionId);
 		replaceState(sessionId, replayFromBranch(ctx));
 		statusWidget?.update();
+		syncLightMode(ctx, sessionId);
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		terminalInputUnsub?.();
 		terminalInputUnsub = undefined;
+		if (ctx.hasUI) {
+			ctx.ui.setStatus?.(LIGHT_STATUS_KEY, undefined);
+			ctx.ui.setWidget?.(LIGHT_LINE_KEY, undefined);
+		}
 		dropSession(sid(ctx));
 		lastAgentRecapKey.delete(sid(ctx));
 		statusWidget?.dispose();
@@ -384,18 +458,21 @@ export default function (pi: ExtensionAPI) {
 				if (!result) {
 					removeEntry(sessionId, entryId);
 					statusWidget?.update();
+					syncLightMode(ctx, sessionId);
 					return;
 				}
 				finalizeEntry(sessionId, entryId, result.recap, result.modelId);
 				setCachedRecapModel(sessionId, result.modelId);
 				persistState(sessionId, pi);
 				statusWidget?.update();
+				syncLightMode(ctx, sessionId);
 			} catch (err) {
 				logError("user recap failed:", err);
 				updateEntryText(sessionId, entryId, "⚠️ Recap failed. Use /recap to pick another model. (For best results, use the benchmark)");
 				finalizeEntry(sessionId, entryId, "⚠️ Recap failed. Use /recap to pick another model. (For best results, use the benchmark)", before.modelOverride || "error");
 				persistState(sessionId, pi);
 				statusWidget?.update();
+				syncLightMode(ctx, sessionId);
 			}
 		})();
 	});
@@ -507,6 +584,7 @@ export default function (pi: ExtensionAPI) {
 					if (!result) {
 						removeEntry(sessionId, entryId);
 						statusWidget?.update();
+						syncLightMode(ctx, sessionId);
 						return;
 					}
 					finalizeEntry(sessionId, entryId, result.recap, result.modelId);
@@ -514,12 +592,14 @@ export default function (pi: ExtensionAPI) {
 					lastAgentRecapKey.set(sessionId, recapKey);
 					persistState(sessionId, pi);
 					statusWidget?.update();
+					syncLightMode(ctx, sessionId);
 				} catch (err) {
 					logError("agent recap failed:", err);
 					updateEntryText(sessionId, entryId, "⚠️ Recap failed. Use /recap to pick another model. (For best results, use the benchmark)");
 					finalizeEntry(sessionId, entryId, "⚠️ Recap failed. Use /recap to pick another model. (For best results, use the benchmark)", beforeAgent.modelOverride || "error");
 					persistState(sessionId, pi);
 					statusWidget?.update();
+					syncLightMode(ctx, sessionId);
 				}
 			})();
 		}
@@ -565,6 +645,8 @@ export default function (pi: ExtensionAPI) {
 				: `🧠 Model: auto-pick${current.lastModel ? ` (last: ${current.lastModel})` : ""}`;
 			const clearModelLabel = "   └─ Reset model to auto-pick";
 			const benchLabel = "⚡ Benchmark models & pick fastest";
+			const modeNow = getGlobalRecapMode();
+			const displayLabel = `🖥 Display: ${modeNow === "full" ? "full card" : modeNow === "footer" ? "footer marker" : "compact line"}`;
 
 			const bl = loadBlacklist();
 			const blLabel = `🚫 Manage Blacklist (${bl.entries.length} items)`;
@@ -577,6 +659,7 @@ export default function (pi: ExtensionAPI) {
 				modelLabel,
 				...(current.modelOverride ? [clearModelLabel] : []),
 				benchLabel,
+				displayLabel,
 				blLabel,
 			];
 
@@ -596,6 +679,7 @@ export default function (pi: ExtensionAPI) {
 				commitState(sessionId, { ...getState(sessionId), goal: next, goalSource: "manual", goalAutoTurnsApplied: 2 });
 				persistState(sessionId, pi);
 				statusWidget?.update();
+				syncLightMode(ctx, sessionId);
 				ctx.ui.notify(`Goal locked: ${next}`, "info");
 				return;
 			}
@@ -604,7 +688,38 @@ export default function (pi: ExtensionAPI) {
 				commitState(sessionId, { ...getState(sessionId), goal: "", goalSource: "auto", goalAutoTurnsApplied: 0 });
 				persistState(sessionId, pi);
 				statusWidget?.update();
+				syncLightMode(ctx, sessionId);
 				ctx.ui.notify("Goal cleared. Will auto-derive next turn.", "info");
+				return;
+			}
+
+			// ── Display mode ─────────────────────────────────────────
+
+			if (choice === displayLabel) {
+				const modeOptions: Array<{ label: string; mode: RecapMode }> = [
+					{ label: "🖼 Full card (above editor)", mode: "full" },
+					{ label: "📍 Footer marker only (recap in title)", mode: "footer" },
+					{ label: "📏 Compact one-line widget (above editor)", mode: "compact" },
+				];
+				const pick = await ctx.ui.select("Recap display mode", modeOptions.map((o) => o.label));
+				if (!pick) return;
+				const chosen = modeOptions.find((o) => o.label === pick);
+				if (!chosen) return;
+				setGlobalRecapMode(chosen.mode);
+				if (chosen.mode === "full") {
+					ctx.ui.setStatus?.(LIGHT_STATUS_KEY, undefined);
+					ctx.ui.setWidget?.(LIGHT_LINE_KEY, undefined);
+					if (ctx.hasUI) {
+						statusWidget ??= new StatusWidget();
+						statusWidget.setUICtx(ctx.ui);
+						statusWidget.update();
+					}
+				} else {
+					statusWidget?.dispose();
+					statusWidget = undefined;
+					syncLightMode(ctx, sessionId);
+				}
+				ctx.ui.notify(`Recap display set to: ${chosen.mode}`, "info");
 				return;
 			}
 
@@ -651,6 +766,7 @@ export default function (pi: ExtensionAPI) {
 				setGlobalModelOverride(undefined);
 				persistState(sessionId, pi);
 				statusWidget?.update();
+				syncLightMode(ctx, sessionId);
 				ctx.ui.notify("Recap model reset globally to auto-pick.", "info");
 				return;
 			}
