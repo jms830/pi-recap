@@ -56,6 +56,7 @@ Type `/recap` for the interactive menu. No arguments needed — everything is se
 | `/recap` → **auto-pick cost: standard / free-only** | Toggle whether automatic fallbacks may use paid models |
 | `/recap` → **model: ...** | Pick from available fast models (select list) |
 | `/recap` → **clear model** | Remove model override |
+| `/recap` → **Display: full card / footer marker / compact line** | Choose the recap surface: full card above the editor, a terse footer marker (full recap in the terminal title), or a compact one-line widget |
 | `/recap` → **blacklist: N entries** → **view / add / remove / reset / re-seed** | Manage the model skip-list |
 
 ## Architecture
