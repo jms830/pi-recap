@@ -1,26 +1,14 @@
 /**
  * Pure model-picker logic for recap streams (v6, 4-layer chain).
  *
- * Lives in its own file (no pi-ai runtime imports, only types) so the probe
- * harness can exercise the ranking deterministically without hauling in the
- * provider stack at module-load time.
- *
  * The chain (top-to-bottom, every layer skips blacklisted ids):
  *   1. user-locked override (modelOverride / preferredId)        -- never blacklisted
  *   2. cached winner with 24h TTL (cachedWinner.id)              -- skipped if expired or blacklisted
  *   3. CURATED_CHAIN (imported from pi-bench)                    -- skipped if blacklisted
- *   4. ctx.model (the user's session model) -- never blacklisted, last
- *      resort, even if it's a reasoning flagship. thinkingOffOpts disables
- *      reasoning for the recap call.
+ *   4. ctx.model (the user's session model)                      -- sacred fallback
  *
- * v6 removes the regex+sort discovery layer (old layer 4). pi-bench is the
- * source of truth — if a model isn't benched, the session model is a safer
- * fallback than guessing from naming patterns and version numbers.
- *
- * Public surface:
- *   - thinkingOffOpts(model): per-provider knob to disable extended thinking
- *   - findFastModelChain(...): the 4-layer ordered chain
- *   - CURATED_CHAIN: editable -- one named const, no scattered literals.
+ * Free-only auto-pick mode filters automatic layers (cached, curated, session)
+ * to zero-cost models. Manual override remains explicit and sacred.
  */
 
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -47,17 +35,67 @@ export function thinkingOffOpts(model: Model<Api>): Record<string, unknown> {
 
 export { CURATED_CHAIN };
 
+export function isFreeModel(model: Model<Api>): boolean {
+	const cost = model.cost;
+	if (!cost) return false;
+	return cost.input === 0 && cost.output === 0 && cost.cacheRead === 0 && cost.cacheWrite === 0;
+}
+
+export function isFastRecapModelId(id: string): boolean {
+	const lower = id.toLowerCase();
+	const hasMini = lower.includes("mini") && !lower.includes("gemini");
+	return lower.includes("flash") || hasMini || lower.includes("haiku") || lower.includes("turbo") || lower.includes("lite") || lower.includes(":free");
+}
+
+export interface ResolvedAuth {
+	ok: boolean;
+	apiKey: string | undefined;
+	headers: Record<string, string>;
+}
+
+/**
+ * Resolve auth across runtimes. Vanilla pi exposes getApiKeyAndHeaders(model);
+ * the @oh-my-pi fork exposes only getApiKey(model). The fork's stream() merges
+ * model-defined headers automatically, so an empty headers map is correct there.
+ */
+export async function resolveModelAuth(registry: any, model: Model<Api>): Promise<ResolvedAuth> {
+	if (typeof registry?.getApiKeyAndHeaders === "function") {
+		try {
+			const r = await registry.getApiKeyAndHeaders(model);
+			return { ok: Boolean(r?.ok && r?.apiKey), apiKey: r?.apiKey, headers: r?.headers ?? {} };
+		} catch {
+			return { ok: false, apiKey: undefined, headers: {} };
+		}
+	}
+	if (typeof registry?.getApiKey === "function") {
+		try {
+			const apiKey = await registry.getApiKey(model);
+			return { ok: Boolean(apiKey), apiKey, headers: {} };
+		} catch {
+			return { ok: false, apiKey: undefined, headers: {} };
+		}
+	}
+	return { ok: false, apiKey: undefined, headers: {} };
+}
+
+function resolveModel(available: Model<Api>[], byId: Map<string, Model<Api>>, id: string): Model<Api> | undefined {
+	const target = byId.get(id);
+	if (target) return target;
+	const normalized = id.replace(/\./g, "-");
+	return available.find(
+		(m) =>
+			m.id === normalized ||
+			m.id.endsWith("." + normalized) ||
+			m.id.endsWith("." + id) ||
+			m.id.endsWith("-" + id),
+	);
+}
+
 /**
  * Build the v6 ordered fallback chain.
  *
- * Layer order:
- *   1. preferredId (override) -- ALWAYS placed first if it resolves; sacred,
- *      never blacklist-skipped here (the user explicitly asked for it).
- *   2. cached winner if non-null AND fresh (within TTL) AND not blacklisted.
- *   3. CURATED_CHAIN ids that are available + not blacklisted.
- *   4. sessionModel (ctx.model) at the very end. Never blacklisted; sacred.
- *
- * Filters duplicates by model.id so the same handle isn't tried twice.
+ * In free-only auto-pick mode, the manual override remains first if present;
+ * all automatic fallbacks are filtered to zero-cost models.
  */
 export function findFastModelChain(
 	registry: { getAvailable(): Model<Api>[] },
@@ -65,6 +103,7 @@ export function findFastModelChain(
 	sessionModel: Model<Api> | undefined,
 	cachedWinner?: CachedModel | undefined,
 	now: number = Date.now(),
+	freeOnlyAutoPick: boolean = false,
 ): Model<Api>[] {
 	const available = registry.getAvailable();
 	const byId = new Map<string, Model<Api>>();
@@ -73,62 +112,40 @@ export function findFastModelChain(
 	const seen = new Set<string>();
 	const chain: Model<Api>[] = [];
 
-	const push = (m: Model<Api> | undefined): void => {
+	const push = (m: Model<Api> | undefined, source: "manual" | "auto"): void => {
 		if (!m) return;
+		if (source === "auto" && freeOnlyAutoPick && !isFreeModel(m)) return;
 		if (seen.has(m.id)) return;
 		seen.add(m.id);
 		chain.push(m);
 	};
 
 	// Layer 1: user override. Never blacklist-checked here -- sacred.
-	if (preferredId) {
-		const target = byId.get(preferredId);
-		if (target) push(target);
-		else {
-			// Fallback: resolve bench CSV bare handle (e.g. "claude-haiku-4.5")
-			// to pi-ai registry ID (e.g. "anthropic.claude-haiku-4-5-20251001-v1:0").
-			// Handles dot→dash normalization and provider-prefix suffix matching.
-			const normalized = preferredId.replace(/\./g, "-");
-			const resolved = available.find(
-				(m) =>
-					m.id === normalized ||
-					m.id.endsWith("." + normalized) ||
-					m.id.endsWith("." + preferredId) ||
-					m.id.endsWith("-" + preferredId),
-			);
-			if (resolved) push(resolved);
-		}
-	}
+	if (preferredId) push(resolveModel(available, byId, preferredId), "manual");
 
 	// Layer 2: cached winner with 24h TTL. Skip if expired or blacklisted.
-	if (isCachedModelFresh(cachedWinner, now) && cachedWinner) {
-		if (!isBlacklisted(cachedWinner.id)) {
-			const cached = byId.get(cachedWinner.id);
-			if (cached) push(cached);
-		}
+	if (isCachedModelFresh(cachedWinner, now) && cachedWinner && !isBlacklisted(cachedWinner.id)) {
+		push(resolveModel(available, byId, cachedWinner.id), "auto");
 	}
 
 	// Layer 3: curated chain. Skip blacklisted.
 	for (const id of CURATED_CHAIN) {
 		if (isBlacklisted(id)) continue;
-		const m = byId.get(id);
-		if (m) push(m);
-		else {
-			// Fallback: resolve bare handle to registry ID.
-			const normalized = id.replace(/\./g, "-");
-			const resolved = available.find(
-				(a) =>
-					a.id === normalized ||
-					a.id.endsWith("." + normalized) ||
-					a.id.endsWith("." + id) ||
-					a.id.endsWith("-" + id),
-			);
-			if (resolved && !isBlacklisted(resolved.id)) push(resolved);
-		}
+		const resolved = resolveModel(available, byId, id);
+		if (resolved && !isBlacklisted(resolved.id)) push(resolved, "auto");
 	}
 
-	// Layer 4: sessionModel. Never blacklisted; sacred.
-	if (sessionModel) push(sessionModel);
+	// Free-only mode needs live free fallbacks even when pi-bench has not
+	// benchmarked that provider yet. Keep them after curated entries so bench
+	// ranking still wins when present.
+	if (freeOnlyAutoPick) {
+		const freeLive = available.filter((m) => isFreeModel(m) && !isBlacklisted(m.id));
+		freeLive.sort((a, b) => Number(isFastRecapModelId(b.id)) - Number(isFastRecapModelId(a.id)));
+		for (const model of freeLive) push(model, "auto");
+	}
+
+	// Layer 4: sessionModel. Sacred from blacklisting, but still automatic.
+	push(sessionModel, "auto");
 
 	return chain;
 }

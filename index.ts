@@ -21,7 +21,7 @@
  *     agent_end, no UI surface of its own.
  *
  * v6 picker chain (top-to-bottom, see subagent/picker.ts):
- *   1. user override (modelOverride from /recap-model <id>)
+ *   1. user override (modelOverride, set via /recap → model)
  *   2. cached winner with 24h TTL (cachedRecapModel.cachedAt)
  *   3. CURATED_CHAIN (imported from pi-bench, the source of truth for bench data)
  *   4. ctx.model (sacred fallback, thinking-off)
@@ -29,7 +29,7 @@
  * v6 surfaces:
  *   - state/blacklist.json: persistent skip-list with seed; addressed by
  *     auto-blacklist on failure and by /recap-blacklist subcommands.
- *   - session-start toast: state.notice ("Selected: <id> · /recap-model
+ *   - session-start toast: state.notice ("Selected: <id> · /recap
  *     to change") shows for 2.5s in the title-right slot, then expires.
  *
  * Persistence: "recap" custom entries in the session branch. Streaming flags
@@ -56,7 +56,7 @@ import {
 	updateEntryText,
 } from "./state/store.js";
 import { replayFromBranch } from "./state/replay.js";
-import { getGlobalModelOverride, setGlobalModelOverride } from "./state/config.js";
+import { getAutoRenameSession, getFreeOnlyAutoPick, getGlobalModelOverride, setAutoRenameSession, setFreeOnlyAutoPick, setGlobalModelOverride } from "./state/config.js";
 import { StatusWidget } from "./ui/status-widget.js";
 import {
 	generateUserRecap,
@@ -190,6 +190,7 @@ function fireSessionStartNotice(
 		before.modelOverride,
 		sessionModel,
 		before.cachedRecapModel,
+		getFreeOnlyAutoPick(),
 	);
 	if (!pickedId) return;
 	setNotice(sessionId, `Selected: ${pickedId} · /recap to change`, NOTICE_DURATION_MS);
@@ -202,6 +203,27 @@ export default function (pi: ExtensionAPI) {
 	let statusWidget: StatusWidget | undefined;
 	let decoyInterval: ReturnType<typeof setInterval> | undefined;
 	let terminalInputUnsub: (() => void) | undefined;
+
+	const pickRecapModel = async (ctx: any, sessionId: string): Promise<void> => {
+		const freeOnly = getFreeOnlyAutoPick();
+		const available = await listAvailableFastModels(ctx.modelRegistry, { freeOnly });
+		if (available.length === 0) {
+			ctx.ui.notify(
+				freeOnly
+					? "No auth-ready free fast models available. Toggle standard auto-pick or run Benchmark."
+					: "No auth-ready fast models available. Run Benchmark or check provider keys.",
+				"warning",
+			);
+			return;
+		}
+		const picked = await ctx.ui.select(freeOnly ? "Free recap model" : "Recap model", available);
+		if (!picked) return;
+		commitState(sessionId, { ...getState(sessionId), modelOverride: picked });
+		setGlobalModelOverride(picked);
+		persistState(sessionId, pi);
+		statusWidget?.update();
+		ctx.ui.notify(`Recap model set globally: ${picked}`, "info");
+	};
 
 	// ── Session lifecycle ──────────────────────────────────────────
 
@@ -332,6 +354,7 @@ export default function (pi: ExtensionAPI) {
 					preferredModelId: before.modelOverride,
 					sessionModel,
 					cachedWinner: before.cachedRecapModel,
+					freeOnlyAutoPick: getFreeOnlyAutoPick(),
 				});
 				if (cachedWinnerCleared) clearCachedRecapModel(sessionId);
 				if (!result) {
@@ -389,6 +412,7 @@ export default function (pi: ExtensionAPI) {
 				preferredModelId: before.modelOverride,
 				sessionModel,
 				cachedWinner: before.cachedGoalModel,
+				freeOnlyAutoPick: getFreeOnlyAutoPick(),
 			};
 			void (async () => {
 				try {
@@ -408,9 +432,9 @@ export default function (pi: ExtensionAPI) {
 					});
 					persistState(sessionId, pi);
 					statusWidget?.update();
-					// Mirror into pi's session label. Fire-and-forget; if pi
-					// throws here it must NOT tank the widget update above.
-					if (nextGoal && nextGoal !== before.goal) {
+					// Mirror into pi's session label when enabled. Fire-and-forget;
+					// if pi throws here it must NOT tank the widget update above.
+					if (getAutoRenameSession() && nextGoal && nextGoal !== before.goal) {
 						try {
 							pi.setSessionName?.(nextGoal);
 						} catch (err) {
@@ -442,6 +466,7 @@ export default function (pi: ExtensionAPI) {
 						preferredModelId: beforeAgent.modelOverride,
 						sessionModel: ctx.model,
 						cachedWinner: beforeAgent.cachedRecapModel,
+						freeOnlyAutoPick: getFreeOnlyAutoPick(),
 					},
 				);
 				if (cachedWinnerCleared) clearCachedRecapModel(sessionId);
@@ -480,7 +505,7 @@ export default function (pi: ExtensionAPI) {
 	// ── Slash command: /recap - unified interactive menu ──────────
 
 	pi.registerCommand("recap", {
-		description: "Manage session goal, recap model, and blacklist",
+		description: "Manage session goal, title rename, recap model, and blacklist",
 		handler: async (_args, ctx) => {
 			const sessionId = sid(ctx);
 			const current = getState(sessionId);
@@ -490,6 +515,14 @@ export default function (pi: ExtensionAPI) {
 				? `🎯 Goal: ${current.goal.slice(0, 40)}${current.goal.length > 40 ? "…" : ""}${current.goalSource === "manual" ? " (locked)" : " (auto)"}`
 				: "🎯 Goal: not set (auto-derives after first turn)";
 			const clearGoalLabel = "   └─ Clear goal & resume auto-derive";
+			const autoRenameEnabled = getAutoRenameSession();
+			const titleRenameLabel = autoRenameEnabled
+				? "🏷️ Session title: auto-renames (toggle off)"
+				: "🏷️ Session title: recap-only (toggle on)";
+			const freeOnlyAutoPick = getFreeOnlyAutoPick();
+			const freeModeLabel = freeOnlyAutoPick
+				? "💸 Auto-pick cost: free-only (toggle standard)"
+				: "💸 Auto-pick cost: standard (toggle free-only)";
 
 			const modelLabel = current.modelOverride
 				? `🧠 Model: ${current.modelOverride} (locked)`
@@ -503,6 +536,8 @@ export default function (pi: ExtensionAPI) {
 			const options = [
 				goalLabel,
 				...(current.goal ? [clearGoalLabel] : []),
+				titleRenameLabel,
+				freeModeLabel,
 				modelLabel,
 				...(current.modelOverride ? [clearModelLabel] : []),
 				benchLabel,
@@ -537,27 +572,41 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
+			// ── Host session title rename ───────────────────────────
+
+			if (choice === titleRenameLabel) {
+				const next = !getAutoRenameSession();
+				setAutoRenameSession(next);
+				ctx.ui.notify(
+					next
+						? "Session auto-rename enabled."
+						: "Session auto-rename disabled. Recap goal still updates.",
+					"info",
+				);
+				return;
+			}
+
 			// ── Model ───────────────────────────────────────────────
 
-			if (choice === modelLabel) {
-				const available = await listAvailableFastModels(ctx.modelRegistry);
-				const fastList = available.filter((id) => {
-					const lower = id.toLowerCase();
-					const hasMini = lower.includes("mini") && !lower.includes("gemini");
-					return lower.includes("flash") || hasMini || lower.includes("haiku")
-						|| lower.includes("turbo") || lower.includes("lite");
-				});
-				if (fastList.length === 0) {
-					ctx.ui.notify("No fast models with valid keys available.", "warning");
-					return;
+			if (choice === freeModeLabel) {
+				const next = !getFreeOnlyAutoPick();
+				setFreeOnlyAutoPick(next);
+				if (next) {
+					clearCachedRecapModel(sessionId);
+					clearCachedGoalModel(sessionId);
 				}
-				const picked = await ctx.ui.select("Recap model", fastList);
-				if (!picked) return;
-				commitState(sessionId, { ...getState(sessionId), modelOverride: picked });
-				setGlobalModelOverride(picked);
-				persistState(sessionId, pi);
 				statusWidget?.update();
-				ctx.ui.notify(`Recap model set globally: ${picked}`, "info");
+				ctx.ui.notify(
+					next
+						? "Free-only auto-pick enabled. Manual locked model still wins if set."
+						: "Standard auto-pick enabled.",
+					"info",
+				);
+				return;
+			}
+
+			if (choice === modelLabel) {
+				await pickRecapModel(ctx, sessionId);
 				return;
 			}
 

@@ -19,10 +19,11 @@ import type { Api, AssistantMessage, Message, Model } from "@earendil-works/pi-a
 import { stream } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { extractConversationContext, buildHistory, extractTextFromMessage } from "./recap.js";
-import { findFastModelChain, thinkingOffOpts } from "./picker.js";
+import { findFastModelChain, resolveModelAuth, thinkingOffOpts } from "./picker.js";
 import { addToBlacklist } from "../state/blacklist.js";
 import type { CachedModel } from "../state/state.js";
 import { logDebug, logError, logTrace } from "../util/log.js";
+import { classifyFailure } from "../util/failure-classification.js";
 
 const ATTEMPT_TIMEOUT_MS = 15000;
 
@@ -44,6 +45,8 @@ export interface GoalOptions {
 	/** Cached winner from a previous successful goal stream this session.
 	 *  Hoisted to layer 2 of the picker chain when present and fresh. */
 	cachedWinner?: CachedModel | undefined;
+	/** When true, automatic fallback candidates are limited to zero-cost models. */
+	freeOnlyAutoPick?: boolean;
 }
 
 export interface GoalResponse {
@@ -59,30 +62,6 @@ function cleanGoal(raw: string): string {
 	return dequoted.slice(0, 60);
 }
 
-function classifyFailure(err: unknown): string | undefined {
-	const raw = err instanceof Error ? (err.message ?? "") : String(err ?? "");
-	const lower = raw.toLowerCase();
-	if (lower.includes("429") || lower.includes("rate limit") || lower.includes("rate_limit") || lower.includes("too many requests")) {
-		return undefined;
-	}
-	const statusMatch = raw.match(/\b(4\d\d|5\d\d)\b/);
-	if (statusMatch) {
-		const status = statusMatch[1];
-		if (lower.includes("insufficient") || lower.includes("credits") || lower.includes("payment")) {
-			return `${status} insufficient credits`;
-		}
-		if (status === "404" || lower.includes("not found") || lower.includes("retired")) {
-			return `${status} endpoint retired`;
-		}
-		return `${status} ${truncateReason(raw)}`;
-	}
-	return `provider error: ${truncateReason(raw)}`;
-}
-
-function truncateReason(s: string): string {
-	const oneLine = s.replace(/\s+/g, " ").trim();
-	return oneLine.length > 60 ? oneLine.slice(0, 57) + "..." : oneLine;
-}
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
@@ -107,6 +86,8 @@ async function streamOnce(
 		options.preferredModelId,
 		options.sessionModel,
 		options.cachedWinner,
+		Date.now(),
+		options.freeOnlyAutoPick === true,
 	);
 	if (chain.length === 0) {
 		logError("goal: no fast model available");
@@ -125,7 +106,7 @@ async function streamOnce(
 		const model = chain[i];
 		if (!model) continue;
 		attempted.push(model.id);
-		const auth = await registry.getApiKeyAndHeaders(model);
+		const auth = await resolveModelAuth(registry, model);
 		if (!auth.ok || !auth.apiKey) {
 			logDebug(`goal: auth not ready for ${model.id}, skipping`);
 			continue;
@@ -176,8 +157,7 @@ async function streamOnce(
 		try {
 			await withTimeout(drain(), ATTEMPT_TIMEOUT_MS);
 		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			const reason = message.startsWith("timeout ") ? message : classifyFailure(err);
+			const reason = classifyFailure(err);
 			handleFailure(model.id, reason, sacredOverride, sacredCachedId, sacredSessionId, () => {
 				cachedWinnerCleared = true;
 			});

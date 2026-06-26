@@ -10,11 +10,11 @@
  *
  * v5 picker integration:
  *   - The picker chain is the 4-layer chain from picker.ts.
- *   - Per-attempt failures are classified into 4 buckets:
- *       * 4xx/5xx (NOT 429)             auto-blacklisted (404 retired etc.)
- *       * empty + reasoning              auto-blacklisted (broken for our use)
- *       * timeout 15s                    auto-blacklisted on non-sacred slots
- *       * 429 / transient                NOT auto-blacklisted; retry next turn
+ *   - Per-attempt failures are classified into durable vs transient buckets:
+ *       * durable auth/billing/retired-model errors auto-blacklist non-sacred slots
+ *       * empty + reasoning / empty response auto-blacklists broken-for-recap models
+ *       * 429, 5xx, network errors, aborts, and timeouts are transient
+ *         (NOT auto-blacklisted; retry next turn)
  *   - "Sacred" slots that are NEVER auto-blacklisted: override (layer 1),
  *     cached winner (layer 2 -- we clear the cache instead), and ctx.model
  *     (layer 5). Everything in layers 3 and 4 is fair game.
@@ -23,26 +23,38 @@
 import type { Api, AssistantMessage, Message, Model } from "@earendil-works/pi-ai";
 import { stream } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { findFastModelChain, thinkingOffOpts } from "./picker.js";
+import { findFastModelChain, isFastRecapModelId, isFreeModel, resolveModelAuth, thinkingOffOpts } from "./picker.js";
 import { addToBlacklist } from "../state/blacklist.js";
 import type { CachedModel } from "../state/state.js";
 import { logDebug, logError, logTrace } from "../util/log.js";
+import { classifyFailure } from "../util/failure-classification.js";
 
-/** Per-attempt timeout. Anything slower than this on a non-sacred candidate
- *  gets auto-blacklisted; cached/override/ctx.model candidates only get the
- *  failure logged and skipped. */
+/** Per-attempt timeout. Slow candidates are treated as transient failures:
+ * cached/override/ctx.model candidates only get the failure logged, and
+ * non-sacred candidates are retried next turn instead of auto-blacklisted. */
 const ATTEMPT_TIMEOUT_MS = 15000;
 
 /**
  * List all fast/cheap models the user has keys for. Used by /recap-model
  * to surface the available options without an LLM call.
  */
-export async function listAvailableFastModels(registry: ModelRegistry): Promise<string[]> {
-	const available = registry.getAvailable();
+export async function listAvailableFastModels(
+	registry: ModelRegistry,
+	options: { freeOnly?: boolean } = {},
+): Promise<string[]> {
+	const candidates = registry.getAvailable().filter((model) => {
+		if (options.freeOnly && !isFreeModel(model)) return false;
+		return true;
+	});
+	const fastCandidates = candidates.filter((model) => isFastRecapModelId(model.id));
+	const available = fastCandidates.length > 0 ? fastCandidates : candidates;
 	const auths = await Promise.all(
-		available.map((model) => registry.getApiKeyAndHeaders(model).then((auth) => ({ model, auth }))),
+		available.map(async (model) => {
+			const auth = await resolveModelAuth(registry, model);
+			return { model, authReady: auth.ok && Boolean(auth.apiKey) };
+		}),
 	);
-	return auths.filter(({ auth }) => auth.ok && auth.apiKey).map(({ model }) => model.id);
+	return auths.filter(({ authReady }) => authReady).map(({ model }) => model.id);
 }
 
 /**
@@ -56,8 +68,9 @@ export function previewFirstPick(
 	preferredId: string | undefined,
 	sessionModel: Model<Api> | undefined,
 	cachedWinner: CachedModel | undefined,
+	freeOnlyAutoPick: boolean = false,
 ): string | undefined {
-	const chain = findFastModelChain(registry, preferredId, sessionModel, cachedWinner);
+	const chain = findFastModelChain(registry, preferredId, sessionModel, cachedWinner, Date.now(), freeOnlyAutoPick);
 	return chain[0]?.id;
 }
 
@@ -134,6 +147,8 @@ export interface RecapOptions {
 	 *  Hoisted to layer 2 by findFastModelChain when present and fresh.
 	 *  Failure CLEARS this slot (via cachedWinnerCleared); never blacklisted. */
 	cachedWinner?: CachedModel | undefined;
+	/** When true, automatic fallback candidates are limited to zero-cost models. */
+	freeOnlyAutoPick?: boolean;
 }
 
 export interface RecapResult {
@@ -168,41 +183,6 @@ export function extractTextFromMessage(msg: AssistantMessage | undefined): strin
 	return parts.join("");
 }
 
-/**
- * Classify a thrown error / message into a blacklist reason. Returns
- * undefined for transient errors (429, network blip) -- those SHOULD NOT
- * be auto-blacklisted; the next turn can retry the same model.
- */
-function classifyFailure(err: unknown): string | undefined {
-	const raw = err instanceof Error ? (err.message ?? "") : String(err ?? "");
-	const lower = raw.toLowerCase();
-
-	// 429 -- transient, never blacklist.
-	if (lower.includes("429") || lower.includes("rate limit") || lower.includes("rate_limit") || lower.includes("too many requests")) {
-		return undefined;
-	}
-
-	// Specific status codes worth tagging.
-	const statusMatch = raw.match(/\b(4\d\d|5\d\d)\b/);
-	if (statusMatch) {
-		const status = statusMatch[1];
-		if (lower.includes("insufficient") || lower.includes("credits") || lower.includes("payment")) {
-			return `${status} insufficient credits`;
-		}
-		if (status === "404" || lower.includes("not found") || lower.includes("retired")) {
-			return `${status} endpoint retired`;
-		}
-		return `${status} ${truncateReason(raw)}`;
-	}
-
-	// Generic provider error fall-through.
-	return `provider error: ${truncateReason(raw)}`;
-}
-
-function truncateReason(s: string): string {
-	const oneLine = s.replace(/\s+/g, " ").trim();
-	return oneLine.length > 60 ? oneLine.slice(0, 57) + "..." : oneLine;
-}
 
 /**
  * Race a stream-iteration loop against a timeout. Resolves with the partial
@@ -253,6 +233,8 @@ async function streamRecap(
 		options.preferredModelId,
 		options.sessionModel,
 		options.cachedWinner,
+		Date.now(),
+		options.freeOnlyAutoPick === true,
 	);
 	if (chain.length === 0) {
 		logError("no fast/cheap model (flash/mini/haiku/turbo) with valid API keys found");
@@ -271,7 +253,7 @@ async function streamRecap(
 		const model = chain[i];
 		if (!model) continue;
 		attempted.push(model.id);
-		const auth = await registry.getApiKeyAndHeaders(model);
+		const auth = await resolveModelAuth(registry, model);
 		if (!auth.ok || !auth.apiKey) {
 			logDebug(`auth not ready for ${model.id}, skipping`);
 			continue;
@@ -410,7 +392,7 @@ async function runOneAttempt(
 		const message = err instanceof Error ? err.message : String(err);
 		if (message.startsWith("timeout ")) {
 			logDebug(`${model.id} timed out`);
-			return { failure: { reason: message } };
+			return { failure: { reason: undefined } };
 		}
 		const classified = classifyFailure(err);
 		logDebug(`${model.id} failed (${message}), classifying as ${classified ?? "transient"}`);

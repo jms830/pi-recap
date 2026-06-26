@@ -18,9 +18,9 @@ If you can't view the video above, here is a fallback GIF version:
 - **Turn history** — last 4 recaps with timestamps, speaker tags (`you` / `pi`), and fade-to-dim for older entries
 - **Live streaming** — breathing dot while thinking, caret blink during token arrival, 180ms settle animation on completion
 - **Keyboard navigation** — `Ctrl+Shift+R` to focus, `↑↓` to scroll older entries, `Esc` to release
-- **Slash commands** — `/goal` to override the title, `/recap-model` to pick the summarization model, `/recap-blacklist` to manage the model skip-list
+- **Slash commands** — `/recap` opens the unified menu (pick summarization model, set goal, rename title, free-only auto-pick toggle, blacklist controls)
 - **Theme-agnostic text colors** — recap headline and body use hardcoded high-contrast colors that work on any theme (light or dark)
-- **Cheap summarization** — auto-selects the fastest/cheapest available model (flash/mini/haiku/turbo) to keep costs near zero. Curated chain and blacklist seed are imported from [pi-bench](https://github.com/fornace/pi-bench), the source of truth for bench data.
+- **Cheap summarization** — auto-selects the fastest/cheapest available model (flash/mini/haiku/turbo) to keep costs near zero. Free-only auto-pick mode restricts automatic fallbacks to auth-ready zero-cost models.
 
 ## Installation
 
@@ -50,8 +50,10 @@ Type `/recap` for the interactive menu. No arguments needed — everything is se
 
 | Menu path | Description |
 |---|---|
-| `/recap` → **goal: ...** | Set/override the session goal (text input) |
+| `/recap` → **goal: ...** | Set/override the recap widget goal (text input) |
 | `/recap` → **clear goal** | Remove override, return to auto-derivation |
+| `/recap` → **session title: auto-renames / recap-only** | Toggle whether auto-derived goals rename the host session title |
+| `/recap` → **auto-pick cost: standard / free-only** | Toggle whether automatic fallbacks may use paid models |
 | `/recap` → **model: ...** | Pick from available fast models (select list) |
 | `/recap` → **clear model** | Remove model override |
 | `/recap` → **blacklist: N entries** → **view / add / remove / reset / re-seed** | Manage the model skip-list |
@@ -75,17 +77,20 @@ pi-recap/
 │   └── anim.ts        # Animation primitives (streaming dot, settle sweep, color utilities)
 └── util/
     ├── date.ts        # Timestamp formatting ("now", "14m", "14:30")
-    └── log.ts         # Best-effort debug logging
+    ├── log.ts         # Best-effort debug logging
+    └── failure-classification.ts  # Durable vs transient provider/API error classification
 ```
 
 ### Model picker chain
 
 The summarization model is selected through a 4-layer chain (top wins):
 
-1. **User override** — set via `/recap-model <id>`
+1. **User override** — set via `/recap` → **model**; explicit override wins even in free-only auto mode
 2. **Cached winner** — 24h TTL from last successful run
 3. **Curated chain** — fast/cheap models imported from [pi-bench](https://github.com/fornace/pi-bench), ordered by bench rank
 4. **Session model** — pi's configured model (sacred fallback, never blacklisted)
+
+When free-only auto-pick is enabled, layers 2-4 are filtered to zero-cost models with configured auth.
 
 ## Development
 

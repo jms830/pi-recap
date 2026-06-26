@@ -16,9 +16,10 @@
  */
 import { stream } from "@earendil-works/pi-ai";
 import { extractConversationContext, buildHistory, extractTextFromMessage } from "./recap.js";
-import { findFastModelChain, thinkingOffOpts } from "./picker.js";
+import { findFastModelChain, resolveModelAuth, thinkingOffOpts } from "./picker.js";
 import { addToBlacklist } from "../state/blacklist.js";
 import { logDebug, logError, logTrace } from "../util/log.js";
+import { classifyFailure } from "../util/failure-classification.js";
 const ATTEMPT_TIMEOUT_MS = 15000;
 const GOAL_INITIAL_SYSTEM = `You title work sessions. Read the conversation excerpt and return a single short noun phrase (max 60 chars) naming what the user is trying to accomplish. No verbs in imperative, no quotes, no markdown, no trailing punctuation. Title Case. Examples: "Auth refactor for /api/v2", "Investigate flaky CI on Linux", "Recap UI styling pass". If the user's intent is unclear, return exactly the token UNCLEAR.`;
 const GOAL_REFINE_SYSTEM = (current) => `You title work sessions. The current title is: "${current}". Read the new conversation excerpt and decide if the title still captures the user's true intent now that more is known. If the existing title is still accurate, return exactly KEEP. Otherwise return ONE replacement title (noun phrase, max 60 chars, Title Case, no quotes/markdown/trailing punctuation).`;
@@ -28,29 +29,6 @@ function cleanGoal(raw) {
     // Drop trailing punctuation and surrounding quotes if the model snuck them in.
     const dequoted = firstLine.replace(/^["'`]+|["'`]+$/g, "").trim();
     return dequoted.slice(0, 60);
-}
-function classifyFailure(err) {
-    const raw = err instanceof Error ? (err.message ?? "") : String(err ?? "");
-    const lower = raw.toLowerCase();
-    if (lower.includes("429") || lower.includes("rate limit") || lower.includes("rate_limit") || lower.includes("too many requests")) {
-        return undefined;
-    }
-    const statusMatch = raw.match(/\b(4\d\d|5\d\d)\b/);
-    if (statusMatch) {
-        const status = statusMatch[1];
-        if (lower.includes("insufficient") || lower.includes("credits") || lower.includes("payment")) {
-            return `${status} insufficient credits`;
-        }
-        if (status === "404" || lower.includes("not found") || lower.includes("retired")) {
-            return `${status} endpoint retired`;
-        }
-        return `${status} ${truncateReason(raw)}`;
-    }
-    return `provider error: ${truncateReason(raw)}`;
-}
-function truncateReason(s) {
-    const oneLine = s.replace(/\s+/g, " ").trim();
-    return oneLine.length > 60 ? oneLine.slice(0, 57) + "..." : oneLine;
 }
 async function withTimeout(promise, ms) {
     let timer;
@@ -66,7 +44,7 @@ async function withTimeout(promise, ms) {
     }
 }
 async function streamOnce(registry, systemPrompt, userMessages, options) {
-    const chain = findFastModelChain(registry, options.preferredModelId, options.sessionModel, options.cachedWinner);
+    const chain = findFastModelChain(registry, options.preferredModelId, options.sessionModel, options.cachedWinner, Date.now(), options.freeOnlyAutoPick === true);
     if (chain.length === 0) {
         logError("goal: no fast model available");
         return { result: null, cachedWinnerCleared: false };
@@ -82,7 +60,7 @@ async function streamOnce(registry, systemPrompt, userMessages, options) {
         if (!model)
             continue;
         attempted.push(model.id);
-        const auth = await registry.getApiKeyAndHeaders(model);
+        const auth = await resolveModelAuth(registry, model);
         if (!auth.ok || !auth.apiKey) {
             logDebug(`goal: auth not ready for ${model.id}, skipping`);
             continue;
@@ -132,8 +110,7 @@ async function streamOnce(registry, systemPrompt, userMessages, options) {
             await withTimeout(drain(), ATTEMPT_TIMEOUT_MS);
         }
         catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            const reason = message.startsWith("timeout ") ? message : classifyFailure(err);
+            const reason = classifyFailure(err);
             handleFailure(model.id, reason, sacredOverride, sacredCachedId, sacredSessionId, () => {
                 cachedWinnerCleared = true;
             });
