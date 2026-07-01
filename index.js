@@ -41,6 +41,7 @@ import { replayFromBranch } from "./state/replay.js";
 import { getAutoRenameSession, getFreeOnlyAutoPick, getGlobalLightMode, getGlobalModelOverride, getGlobalRecapMode, setAutoRenameSession, setFreeOnlyAutoPick, setGlobalModelOverride, setGlobalRecapMode } from "./state/config.js";
 import { StatusWidget, IN_MULTIPLEXER } from "./ui/status-widget.js";
 import { generateUserRecap, generateAgentRecap, extractTextFromMessage, listAvailableFastModels, previewFirstPick, } from "./subagent/recap.js";
+import { modelKey, resolveModel } from "./subagent/picker.js";
 import { deriveGoalInitial, deriveGoalRefine } from "./subagent/goal.js";
 import { addToBlacklist, loadBlacklist, removeFromBlacklist, resetBlacklist, seedBlacklist, } from "./state/blacklist.js";
 import { logError } from "./util/log.js";
@@ -127,20 +128,8 @@ function persistState(sessionId, pi) {
  * Returns the resolved registry ID, or undefined if no match is found.
  */
 function resolveModelId(bareHandle, registry) {
-    const available = registry.getAvailable();
-    // Exact match first.
-    if (available.some((m) => m.id === bareHandle))
-        return bareHandle;
-    // Normalize dots to dashes ("claude-haiku-4.5" → "claude-haiku-4-5").
-    const normalized = bareHandle.replace(/\./g, "-");
-    const normMatch = available.find((m) => m.id === normalized || m.id.endsWith("." + normalized));
-    if (normMatch)
-        return normMatch.id;
-    // Suffix match: registry ID ends with ".bareHandle" or "-bareHandle".
-    const suffixMatch = available.find((m) => m.id.endsWith("." + bareHandle) || m.id.endsWith("-" + bareHandle));
-    if (suffixMatch)
-        return suffixMatch.id;
-    return undefined;
+    const resolved = resolveModel(registry.getAvailable(), bareHandle);
+    return resolved ? modelKey(resolved) : undefined;
 }
 /**
  * Fire the session-start toast in the title-right slot. Picks the picker's

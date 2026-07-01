@@ -38,6 +38,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import {
 	addStreamingEntry,
 	clearCachedGoalModel,
@@ -66,6 +67,7 @@ import {
 	listAvailableFastModels,
 	previewFirstPick,
 } from "./subagent/recap.js";
+import { modelKey, resolveModel } from "./subagent/picker.js";
 import { deriveGoalInitial, deriveGoalRefine } from "./subagent/goal.js";
 import {
 	addToBlacklist,
@@ -169,21 +171,10 @@ function persistState(sessionId: string, pi: ExtensionAPI): void {
  */
 function resolveModelId(
 	bareHandle: string,
-	registry: { getAvailable(): Array<{ id: string }> },
+	registry: { getAvailable(): Model<Api>[] },
 ): string | undefined {
-	const available = registry.getAvailable();
-	// Exact match first.
-	if (available.some((m) => m.id === bareHandle)) return bareHandle;
-	// Normalize dots to dashes ("claude-haiku-4.5" → "claude-haiku-4-5").
-	const normalized = bareHandle.replace(/\./g, "-");
-	const normMatch = available.find((m) => m.id === normalized || m.id.endsWith("." + normalized));
-	if (normMatch) return normMatch.id;
-	// Suffix match: registry ID ends with ".bareHandle" or "-bareHandle".
-	const suffixMatch = available.find(
-		(m) => m.id.endsWith("." + bareHandle) || m.id.endsWith("-" + bareHandle),
-	);
-	if (suffixMatch) return suffixMatch.id;
-	return undefined;
+	const resolved = resolveModel(registry.getAvailable(), bareHandle);
+	return resolved ? modelKey(resolved) : undefined;
 }
 
 /**

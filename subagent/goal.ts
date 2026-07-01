@@ -19,7 +19,7 @@ import type { Api, AssistantMessage, Message, Model } from "@earendil-works/pi-a
 import { stream } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { extractConversationContext, buildHistory, extractTextFromMessage } from "./recap.js";
-import { findFastModelChain, resolveModelAuth, thinkingOffOpts } from "./picker.js";
+import { findFastModelChain, modelKey, resolveModelAuth, resolveModelKey, thinkingOffOpts } from "./picker.js";
 import { addToBlacklist } from "../state/blacklist.js";
 import type { CachedModel } from "../state/state.js";
 import { logDebug, logError, logTrace } from "../util/log.js";
@@ -81,6 +81,7 @@ async function streamOnce(
 	userMessages: Message[],
 	options: GoalOptions,
 ): Promise<{ raw: string; modelId: string; cachedWinnerCleared: boolean } | { result: null; cachedWinnerCleared: boolean }> {
+	const available = registry.getAvailable();
 	const chain = findFastModelChain(
 		registry,
 		options.preferredModelId,
@@ -94,9 +95,9 @@ async function streamOnce(
 		return { result: null, cachedWinnerCleared: false };
 	}
 
-	const sacredOverride = options.preferredModelId;
-	const sacredCachedId = options.cachedWinner?.id;
-	const sacredSessionId = options.sessionModel?.id;
+	const sacredOverride = resolveModelKey(available, options.preferredModelId);
+	const sacredCachedId = resolveModelKey(available, options.cachedWinner?.id);
+	const sacredSessionId = options.sessionModel ? modelKey(options.sessionModel) : undefined;
 
 	let lastError: unknown = undefined;
 	let cachedWinnerCleared = false;
@@ -105,10 +106,11 @@ async function streamOnce(
 	for (let i = 0; i < chain.length; i++) {
 		const model = chain[i];
 		if (!model) continue;
-		attempted.push(model.id);
+		const key = modelKey(model);
+		attempted.push(key);
 		const auth = await resolveModelAuth(registry, model);
 		if (!auth.ok || !auth.apiKey) {
-			logDebug(`goal: auth not ready for ${model.id}, skipping`);
+			logDebug(`goal: auth not ready for ${key}, skipping`);
 			continue;
 		}
 
@@ -130,7 +132,7 @@ async function streamOnce(
 				},
 			);
 			for await (const event of events) {
-				logTrace(`goal ${model.id} event=${event.type}`);
+				logTrace(`goal ${key} event=${event.type}`);
 				if (event.type === "text_delta") {
 					sawTextDelta = true;
 					running += event.delta;
@@ -158,7 +160,7 @@ async function streamOnce(
 			await withTimeout(drain(), ATTEMPT_TIMEOUT_MS);
 		} catch (err) {
 			const reason = classifyFailure(err);
-			handleFailure(model.id, reason, sacredOverride, sacredCachedId, sacredSessionId, () => {
+			handleFailure(model, reason, sacredOverride, sacredCachedId, sacredSessionId, () => {
 				cachedWinnerCleared = true;
 			});
 			lastError = reason ?? "transient";
@@ -167,15 +169,15 @@ async function streamOnce(
 
 		if (!running.trim()) {
 			const reason = sawReasoning ? "empty + reasoning" : "empty response";
-			handleFailure(model.id, reason, sacredOverride, sacredCachedId, sacredSessionId, () => {
+			handleFailure(model, reason, sacredOverride, sacredCachedId, sacredSessionId, () => {
 				cachedWinnerCleared = true;
 			});
 			lastError = reason;
 			continue;
 		}
 
-		logDebug(`goal landed on ${model.id} (attempts: ${attempted.length})`);
-		return { raw: running, modelId: model.id, cachedWinnerCleared };
+		logDebug(`goal landed on ${modelKey(model)} (attempts: ${attempted.length})`);
+		return { raw: running, modelId: modelKey(model), cachedWinnerCleared };
 	}
 
 	logError(`goal: all fallback candidates failed (tried ${attempted.length}: ${attempted.join(", ")})`, lastError);
@@ -183,13 +185,14 @@ async function streamOnce(
 }
 
 function handleFailure(
-	id: string,
+	model: Model<Api>,
 	reason: string | undefined,
 	sacredOverride: string | undefined,
 	sacredCachedId: string | undefined,
 	sacredSessionId: string | undefined,
 	onCacheClear: () => void,
 ): void {
+	const id = modelKey(model);
 	const isOverride = sacredOverride === id;
 	const isCached = sacredCachedId === id;
 	const isSession = sacredSessionId === id;

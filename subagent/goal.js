@@ -16,7 +16,7 @@
  */
 import { stream } from "@earendil-works/pi-ai";
 import { extractConversationContext, buildHistory, extractTextFromMessage } from "./recap.js";
-import { findFastModelChain, resolveModelAuth, thinkingOffOpts } from "./picker.js";
+import { findFastModelChain, modelKey, resolveModelAuth, resolveModelKey, thinkingOffOpts } from "./picker.js";
 import { addToBlacklist } from "../state/blacklist.js";
 import { logDebug, logError, logTrace } from "../util/log.js";
 import { classifyFailure } from "../util/failure-classification.js";
@@ -44,14 +44,15 @@ async function withTimeout(promise, ms) {
     }
 }
 async function streamOnce(registry, systemPrompt, userMessages, options) {
+    const available = registry.getAvailable();
     const chain = findFastModelChain(registry, options.preferredModelId, options.sessionModel, options.cachedWinner, Date.now(), options.freeOnlyAutoPick === true);
     if (chain.length === 0) {
         logError("goal: no fast model available");
         return { result: null, cachedWinnerCleared: false };
     }
-    const sacredOverride = options.preferredModelId;
-    const sacredCachedId = options.cachedWinner?.id;
-    const sacredSessionId = options.sessionModel?.id;
+    const sacredOverride = resolveModelKey(available, options.preferredModelId);
+    const sacredCachedId = resolveModelKey(available, options.cachedWinner?.id);
+    const sacredSessionId = options.sessionModel ? modelKey(options.sessionModel) : undefined;
     let lastError = undefined;
     let cachedWinnerCleared = false;
     const attempted = [];
@@ -59,10 +60,11 @@ async function streamOnce(registry, systemPrompt, userMessages, options) {
         const model = chain[i];
         if (!model)
             continue;
-        attempted.push(model.id);
+        const key = modelKey(model);
+        attempted.push(key);
         const auth = await resolveModelAuth(registry, model);
         if (!auth.ok || !auth.apiKey) {
-            logDebug(`goal: auth not ready for ${model.id}, skipping`);
+            logDebug(`goal: auth not ready for ${key}, skipping`);
             continue;
         }
         let running = "";
@@ -78,7 +80,7 @@ async function streamOnce(registry, systemPrompt, userMessages, options) {
                 ...thinkingOffOpts(model),
             });
             for await (const event of events) {
-                logTrace(`goal ${model.id} event=${event.type}`);
+                logTrace(`goal ${key} event=${event.type}`);
                 if (event.type === "text_delta") {
                     sawTextDelta = true;
                     running += event.delta;
@@ -111,7 +113,7 @@ async function streamOnce(registry, systemPrompt, userMessages, options) {
         }
         catch (err) {
             const reason = classifyFailure(err);
-            handleFailure(model.id, reason, sacredOverride, sacredCachedId, sacredSessionId, () => {
+            handleFailure(model, reason, sacredOverride, sacredCachedId, sacredSessionId, () => {
                 cachedWinnerCleared = true;
             });
             lastError = reason ?? "transient";
@@ -119,19 +121,20 @@ async function streamOnce(registry, systemPrompt, userMessages, options) {
         }
         if (!running.trim()) {
             const reason = sawReasoning ? "empty + reasoning" : "empty response";
-            handleFailure(model.id, reason, sacredOverride, sacredCachedId, sacredSessionId, () => {
+            handleFailure(model, reason, sacredOverride, sacredCachedId, sacredSessionId, () => {
                 cachedWinnerCleared = true;
             });
             lastError = reason;
             continue;
         }
-        logDebug(`goal landed on ${model.id} (attempts: ${attempted.length})`);
-        return { raw: running, modelId: model.id, cachedWinnerCleared };
+        logDebug(`goal landed on ${modelKey(model)} (attempts: ${attempted.length})`);
+        return { raw: running, modelId: modelKey(model), cachedWinnerCleared };
     }
     logError(`goal: all fallback candidates failed (tried ${attempted.length}: ${attempted.join(", ")})`, lastError);
     return { result: null, cachedWinnerCleared };
 }
-function handleFailure(id, reason, sacredOverride, sacredCachedId, sacredSessionId, onCacheClear) {
+function handleFailure(model, reason, sacredOverride, sacredCachedId, sacredSessionId, onCacheClear) {
+    const id = modelKey(model);
     const isOverride = sacredOverride === id;
     const isCached = sacredCachedId === id;
     const isSession = sacredSessionId === id;

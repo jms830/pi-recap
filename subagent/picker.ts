@@ -35,6 +35,20 @@ export function thinkingOffOpts(model: Model<Api>): Record<string, unknown> {
 
 export { CURATED_CHAIN };
 
+export function modelKey(model: Pick<Model<Api>, "provider" | "id">): string {
+	return model.provider ? `${model.provider}/${model.id}` : model.id;
+}
+
+export function resolveModelKey(available: Model<Api>[], id: string | undefined): string | undefined {
+	if (!id) return undefined;
+	const resolved = resolveModel(available, id);
+	return resolved ? modelKey(resolved) : undefined;
+}
+
+function isBlacklistedModel(model: Model<Api>): boolean {
+	return isBlacklisted(modelKey(model)) || isBlacklisted(model.id);
+}
+
 export function isFreeModel(model: Model<Api>): boolean {
 	const cost = model.cost;
 	if (!cost) return false;
@@ -49,6 +63,10 @@ export function isFastRecapModelId(id: string): boolean {
 	const lower = id.toLowerCase();
 	const hasMini = lower.includes("mini") && !lower.includes("gemini");
 	return lower.includes("flash") || hasMini || lower.includes("haiku") || lower.includes("turbo") || lower.includes("lite") || lower.includes(":free");
+}
+
+export function isFastRecapModel(model: Model<Api>): boolean {
+	return isFastRecapModelId(model.id) || isFastRecapModelId(modelKey(model));
 }
 
 export interface ResolvedAuth {
@@ -82,16 +100,23 @@ export async function resolveModelAuth(registry: any, model: Model<Api>): Promis
 	return { ok: false, apiKey: undefined, headers: {} };
 }
 
-function resolveModel(available: Model<Api>[], byId: Map<string, Model<Api>>, id: string): Model<Api> | undefined {
-	const target = byId.get(id);
-	if (target) return target;
+export function resolveModel(available: Model<Api>[], id: string): Model<Api> | undefined {
+	const providerMatch = available.find((m) => modelKey(m) === id);
+	if (providerMatch) return providerMatch;
+
+	const bareMatch = available.find((m) => m.id === id);
+	if (bareMatch) return bareMatch;
+
 	const normalized = id.replace(/\./g, "-");
 	return available.find(
 		(m) =>
 			m.id === normalized ||
+			modelKey(m) === normalized ||
 			m.id.endsWith("." + normalized) ||
 			m.id.endsWith("." + id) ||
-			m.id.endsWith("-" + id),
+			m.id.endsWith("-" + id) ||
+			modelKey(m).endsWith("/" + normalized) ||
+			modelKey(m).endsWith("/" + id),
 	);
 }
 
@@ -110,8 +135,6 @@ export function findFastModelChain(
 	freeOnlyAutoPick: boolean = false,
 ): Model<Api>[] {
 	const available = registry.getAvailable();
-	const byId = new Map<string, Model<Api>>();
-	for (const m of available) byId.set(m.id, m);
 
 	const seen = new Set<string>();
 	const chain: Model<Api>[] = [];
@@ -119,32 +142,33 @@ export function findFastModelChain(
 	const push = (m: Model<Api> | undefined, source: "manual" | "auto"): void => {
 		if (!m) return;
 		if (source === "auto" && freeOnlyAutoPick && !isFreeModel(m)) return;
-		if (seen.has(m.id)) return;
-		seen.add(m.id);
+		const key = modelKey(m);
+		if (seen.has(key)) return;
+		seen.add(key);
 		chain.push(m);
 	};
 
 	// Layer 1: user override. Never blacklist-checked here -- sacred.
-	if (preferredId) push(resolveModel(available, byId, preferredId), "manual");
+	if (preferredId) push(resolveModel(available, preferredId), "manual");
 
 	// Layer 2: cached winner with 24h TTL. Skip if expired or blacklisted.
-	if (isCachedModelFresh(cachedWinner, now) && cachedWinner && !isBlacklisted(cachedWinner.id)) {
-		push(resolveModel(available, byId, cachedWinner.id), "auto");
+	if (isCachedModelFresh(cachedWinner, now) && cachedWinner) {
+		const cached = resolveModel(available, cachedWinner.id);
+		if (cached && !isBlacklisted(cachedWinner.id) && !isBlacklistedModel(cached)) push(cached, "auto");
 	}
 
 	// Layer 3: curated chain. Skip blacklisted.
 	for (const id of CURATED_CHAIN) {
-		if (isBlacklisted(id)) continue;
-		const resolved = resolveModel(available, byId, id);
-		if (resolved && !isBlacklisted(resolved.id)) push(resolved, "auto");
+		const resolved = resolveModel(available, id);
+		if (resolved && !isBlacklisted(id) && !isBlacklistedModel(resolved)) push(resolved, "auto");
 	}
 
 	// Free-only mode needs live free fallbacks even when pi-bench has not
 	// benchmarked that provider yet. Keep them after curated entries so bench
 	// ranking still wins when present.
 	if (freeOnlyAutoPick) {
-		const freeLive = available.filter((m) => isFreeModel(m) && !isBlacklisted(m.id));
-		freeLive.sort((a, b) => Number(isFastRecapModelId(b.id)) - Number(isFastRecapModelId(a.id)));
+		const freeLive = available.filter((m) => isFreeModel(m) && !isBlacklistedModel(m));
+		freeLive.sort((a, b) => Number(isFastRecapModel(b)) - Number(isFastRecapModel(a)));
 		for (const model of freeLive) push(model, "auto");
 	}
 

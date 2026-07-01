@@ -5,20 +5,23 @@
 - State persistence is dual: per-branch via `pi.appendEntry("recap", ...)` and global via `$XDG_STATE_HOME/pi-recap/state/config.json` (defaults to `~/.local/state/pi-recap/...`; falls back to the legacy `~/.pi/agent/extensions/pi-recap/state/config.json` when present)
 - The StatusWidget renders in the terminal via pi-tui; it's reused across sessions (`??=` in `session_start`)
 
-## pi-ai model ID format mismatch (CRITICAL)
-The pi-ai registry uses **provider-prefixed IDs** like `anthropic.claude-haiku-4-5-20251001-v1:0`.
-The bench CSV and CURATED_CHAIN use **bare handles** like `claude-haiku-4.5`.
-The picker (`subagent/picker.ts`) does `byId.get(id)` — exact match fails silently.
+## Model identity: persist provider/id, resolve legacy bare IDs
+The model object has separate `provider` and `id` fields. Persist and display the canonical key as `provider/id` (for example `freeride/auto`) so duplicate bare IDs from different providers do not collide.
 
-**Resolution strategy** (in `resolveModelId()` and picker fallback):
-1. Exact match first
-2. Normalize dots to dashes (`claude-haiku-4.5` → `claude-haiku-4-5`)
-3. Suffix match against registry IDs (`anthropic.claude-haiku-4-5`)
+The bench CSV and `CURATED_CHAIN` still use **bare handles** like `claude-haiku-4.5`, and old saved state may also contain bare IDs.
+
+**Resolution strategy** (in `subagent/picker.ts:resolveModel()` and `index.ts:resolveModelId()`):
+1. Exact `provider/id` match first
+2. Legacy bare `id` match
+3. Normalize dots to dashes (`claude-haiku-4.5` → `claude-haiku-4-5`)
+4. Suffix match against registry IDs / provider keys
 
 Applied in:
-- Bench handler (index.ts): resolves before saving modelOverride
-- Picker Layer 1 (user override): fallback resolution for existing bare handles
-- Picker Layer 3 (curated chain): fallback resolution so curated chain actually works
+- `/recap → model` list: returns provider/id keys from `listAvailableFastModels()`
+- Bench handler (index.ts): resolves before saving `modelOverride`
+- Picker Layer 1 (user override): provider/id disambiguates duplicate bare IDs; legacy bare IDs still work
+- Picker Layer 2/3 cache + curated chain: fallback resolution so old cached winners and pi-bench handles still work
+- Regression coverage: `test-picker.ts`
 
 ## Widget rendering pause pattern
 To prevent the StatusWidget animation timer from painting over custom UI overlays:

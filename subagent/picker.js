@@ -29,6 +29,18 @@ export function thinkingOffOpts(model) {
 // Imported from pi-bench (the source of truth for bench data).
 // Run a new bench → pi-bench updates CURATED_CHAIN → pi-recap picks it up.
 export { CURATED_CHAIN };
+export function modelKey(model) {
+    return model.provider ? `${model.provider}/${model.id}` : model.id;
+}
+export function resolveModelKey(available, id) {
+    if (!id)
+        return undefined;
+    const resolved = resolveModel(available, id);
+    return resolved ? modelKey(resolved) : undefined;
+}
+function isBlacklistedModel(model) {
+    return isBlacklisted(modelKey(model)) || isBlacklisted(model.id);
+}
 export function isFreeModel(model) {
     const cost = model.cost;
     if (!cost)
@@ -43,6 +55,9 @@ export function isFastRecapModelId(id) {
     const lower = id.toLowerCase();
     const hasMini = lower.includes("mini") && !lower.includes("gemini");
     return lower.includes("flash") || hasMini || lower.includes("haiku") || lower.includes("turbo") || lower.includes("lite") || lower.includes(":free");
+}
+export function isFastRecapModel(model) {
+    return isFastRecapModelId(model.id) || isFastRecapModelId(modelKey(model));
 }
 /**
  * Resolve auth across runtimes. Vanilla pi exposes getApiKeyAndHeaders(model);
@@ -70,15 +85,21 @@ export async function resolveModelAuth(registry, model) {
     }
     return { ok: false, apiKey: undefined, headers: {} };
 }
-function resolveModel(available, byId, id) {
-    const target = byId.get(id);
-    if (target)
-        return target;
+export function resolveModel(available, id) {
+    const providerMatch = available.find((m) => modelKey(m) === id);
+    if (providerMatch)
+        return providerMatch;
+    const bareMatch = available.find((m) => m.id === id);
+    if (bareMatch)
+        return bareMatch;
     const normalized = id.replace(/\./g, "-");
     return available.find((m) => m.id === normalized ||
+        modelKey(m) === normalized ||
         m.id.endsWith("." + normalized) ||
         m.id.endsWith("." + id) ||
-        m.id.endsWith("-" + id));
+        m.id.endsWith("-" + id) ||
+        modelKey(m).endsWith("/" + normalized) ||
+        modelKey(m).endsWith("/" + id));
 }
 /**
  * Build the v6 ordered fallback chain.
@@ -88,9 +109,6 @@ function resolveModel(available, byId, id) {
  */
 export function findFastModelChain(registry, preferredId, sessionModel, cachedWinner, now = Date.now(), freeOnlyAutoPick = false) {
     const available = registry.getAvailable();
-    const byId = new Map();
-    for (const m of available)
-        byId.set(m.id, m);
     const seen = new Set();
     const chain = [];
     const push = (m, source) => {
@@ -98,32 +116,33 @@ export function findFastModelChain(registry, preferredId, sessionModel, cachedWi
             return;
         if (source === "auto" && freeOnlyAutoPick && !isFreeModel(m))
             return;
-        if (seen.has(m.id))
+        const key = modelKey(m);
+        if (seen.has(key))
             return;
-        seen.add(m.id);
+        seen.add(key);
         chain.push(m);
     };
     // Layer 1: user override. Never blacklist-checked here -- sacred.
     if (preferredId)
-        push(resolveModel(available, byId, preferredId), "manual");
+        push(resolveModel(available, preferredId), "manual");
     // Layer 2: cached winner with 24h TTL. Skip if expired or blacklisted.
-    if (isCachedModelFresh(cachedWinner, now) && cachedWinner && !isBlacklisted(cachedWinner.id)) {
-        push(resolveModel(available, byId, cachedWinner.id), "auto");
+    if (isCachedModelFresh(cachedWinner, now) && cachedWinner) {
+        const cached = resolveModel(available, cachedWinner.id);
+        if (cached && !isBlacklisted(cachedWinner.id) && !isBlacklistedModel(cached))
+            push(cached, "auto");
     }
     // Layer 3: curated chain. Skip blacklisted.
     for (const id of CURATED_CHAIN) {
-        if (isBlacklisted(id))
-            continue;
-        const resolved = resolveModel(available, byId, id);
-        if (resolved && !isBlacklisted(resolved.id))
+        const resolved = resolveModel(available, id);
+        if (resolved && !isBlacklisted(id) && !isBlacklistedModel(resolved))
             push(resolved, "auto");
     }
     // Free-only mode needs live free fallbacks even when pi-bench has not
     // benchmarked that provider yet. Keep them after curated entries so bench
     // ranking still wins when present.
     if (freeOnlyAutoPick) {
-        const freeLive = available.filter((m) => isFreeModel(m) && !isBlacklisted(m.id));
-        freeLive.sort((a, b) => Number(isFastRecapModelId(b.id)) - Number(isFastRecapModelId(a.id)));
+        const freeLive = available.filter((m) => isFreeModel(m) && !isBlacklistedModel(m));
+        freeLive.sort((a, b) => Number(isFastRecapModel(b)) - Number(isFastRecapModel(a)));
         for (const model of freeLive)
             push(model, "auto");
     }

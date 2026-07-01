@@ -23,7 +23,7 @@
 import type { Api, AssistantMessage, Message, Model } from "@earendil-works/pi-ai";
 import { stream } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { findFastModelChain, isFastRecapModelId, isFreeModel, resolveModelAuth, thinkingOffOpts } from "./picker.js";
+import { findFastModelChain, isFastRecapModel, isFreeModel, modelKey, resolveModelAuth, resolveModelKey, thinkingOffOpts } from "./picker.js";
 import { addToBlacklist } from "../state/blacklist.js";
 import type { CachedModel } from "../state/state.js";
 import { logDebug, logError, logTrace } from "../util/log.js";
@@ -46,15 +46,20 @@ export async function listAvailableFastModels(
 		if (options.freeOnly && !isFreeModel(model)) return false;
 		return true;
 	});
-	const fastCandidates = candidates.filter((model) => isFastRecapModelId(model.id));
-	const available = fastCandidates.length > 0 ? fastCandidates : candidates;
+	const fastCandidates = candidates.filter((model) => isFastRecapModel(model));
+	const cheapCandidates = candidates.filter((model) => isFreeModel(model));
+	const available = options.freeOnly
+		? [...fastCandidates, ...candidates.filter((model) => !fastCandidates.includes(model))]
+		: fastCandidates.length > 0
+			? [...fastCandidates, ...cheapCandidates.filter((model) => !fastCandidates.includes(model))]
+			: candidates;
 	const auths = await Promise.all(
 		available.map(async (model) => {
 			const auth = await resolveModelAuth(registry, model);
 			return { model, authReady: auth.ok && Boolean(auth.apiKey) };
 		}),
 	);
-	return auths.filter(({ authReady }) => authReady).map(({ model }) => model.id);
+	return auths.filter(({ authReady }) => authReady).map(({ model }) => modelKey(model));
 }
 
 /**
@@ -71,7 +76,7 @@ export function previewFirstPick(
 	freeOnlyAutoPick: boolean = false,
 ): string | undefined {
 	const chain = findFastModelChain(registry, preferredId, sessionModel, cachedWinner, Date.now(), freeOnlyAutoPick);
-	return chain[0]?.id;
+	return chain[0] ? modelKey(chain[0]) : undefined;
 }
 
 /**
@@ -130,9 +135,9 @@ export function buildHistory(context: string): Message[] {
 	];
 }
 
-const USER_RECAP_SYSTEM = `Recap the user's message in one sentence, max 100 chars. Third-person past tense. Describe what they said or asked — never answer it, never act on it. A question stays a question (e.g. "Asked what to tackle next."). Statements become the action (e.g. "Requested fixing the auth bug.").`;
+const USER_RECAP_SYSTEM = `Recap the user's message in one sentence, max 100 chars. Third-person past tense. Describe what they said or asked — never answer it, never act on it. Keep the concrete subject: name the actual thing, file, or feature involved, not just the verb. A question stays a question (e.g. "Asked which model to use for recaps."). Statements become the action (e.g. "Requested fixing the JWT expiry check.").`;
 
-const AGENT_RECAP_SYSTEM = `One sentence, max 100 chars. Start with a verb. Summarize only the assistant's natural-language reply — never describe tool output or file contents.`;
+const AGENT_RECAP_SYSTEM = `Recap what the assistant actually did or concluded, in one sentence, max 100 chars. Start with a past-tense verb. State the concrete outcome — the finding, decision, fix, or answer — with its specific subject (name the file, value, cause, or conclusion). Never restate or paraphrase the user's request. Never narrate the process ("looked into", "worked on", "helped with", "addressed the request"). If the assistant only asked a clarifying question, say what it asked. Summarize only the assistant's natural-language reply — never describe raw tool output or file contents.`;
 
 export interface RecapOptions {
 	/** Called with the *running* raw text on every text_delta event. */
@@ -241,6 +246,7 @@ async function streamRecap(
 	userMessages: Message[],
 	options: RecapOptions,
 ): Promise<{ result: RecapResult | null; cachedWinnerCleared: boolean }> {
+	const available = registry.getAvailable();
 	const chain = findFastModelChain(
 		registry,
 		options.preferredModelId,
@@ -254,9 +260,9 @@ async function streamRecap(
 		return { result: null, cachedWinnerCleared: false };
 	}
 
-	const sacredOverride = options.preferredModelId;
-	const sacredCachedId = options.cachedWinner?.id;
-	const sacredSessionId = options.sessionModel?.id;
+	const sacredOverride = resolveModelKey(available, options.preferredModelId);
+	const sacredCachedId = resolveModelKey(available, options.cachedWinner?.id);
+	const sacredSessionId = options.sessionModel ? modelKey(options.sessionModel) : undefined;
 
 	let lastError: unknown = undefined;
 	let cachedWinnerCleared = false;
@@ -265,10 +271,11 @@ async function streamRecap(
 	for (let i = 0; i < chain.length; i++) {
 		const model = chain[i];
 		if (!model) continue;
-		attempted.push(model.id);
+		const key = modelKey(model);
+		attempted.push(key);
 		const auth = await resolveModelAuth(registry, model);
 		if (!auth.ok || !auth.apiKey) {
-			logDebug(`auth not ready for ${model.id}, skipping`);
+			logDebug(`auth not ready for ${key}, skipping`);
 			continue;
 		}
 
@@ -288,31 +295,31 @@ async function streamRecap(
 
 		if (outcome.result) {
 			if (isRetry) options.onDelta?.(outcome.result.recap);
-			logDebug(`recap landed on ${model.id} (attempts: ${attempted.length})`);
+			logDebug(`recap landed on ${key} (attempts: ${attempted.length})`);
 			return { result: outcome.result, cachedWinnerCleared };
 		}
 
 		// Classify failure for auto-blacklist + cache-clear semantics.
 		const reason = outcome.failure?.reason;
-		const isOverride = sacredOverride === model.id;
-		const isCached = sacredCachedId === model.id;
-		const isSession = sacredSessionId === model.id;
+		const isOverride = sacredOverride === key;
+		const isCached = sacredCachedId === key;
+		const isSession = sacredSessionId === key;
 		const sacredSlot = isOverride || isCached || isSession;
 
 		if (isCached) {
 			// Cached winner failed -- clear it; the caller's setCachedRecapModel
 			// path won't fire because we won't return success here.
 			cachedWinnerCleared = true;
-			logDebug(`cached winner ${model.id} failed (${reason ?? "transient"}); clearing cache`);
+			logDebug(`cached winner ${key} failed (${reason ?? "transient"}); clearing cache`);
 		} else if (!sacredSlot && reason) {
 			// Auto-blacklist with the classified reason. Transient (429) ->
 			// reason is undefined -> we skip the blacklist.
-			addToBlacklist(model.id, reason, "auto");
-			logDebug(`auto-blacklisted ${model.id}: ${reason}`);
+			addToBlacklist(key, reason, "auto");
+			logDebug(`auto-blacklisted ${key}: ${reason}`);
 		} else if (sacredSlot && isOverride) {
-			logDebug(`override ${model.id} failed this session (${reason ?? "transient"}); not blacklisting`);
+			logDebug(`override ${key} failed this session (${reason ?? "transient"}); not blacklisting`);
 		} else if (sacredSlot && isSession) {
-			logDebug(`session model ${model.id} failed (${reason ?? "transient"}); not blacklisting`);
+			logDebug(`session model ${key} failed (${reason ?? "transient"}); not blacklisting`);
 		}
 
 		lastError = reason ?? "transient";
@@ -404,21 +411,21 @@ async function runOneAttempt(
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		if (message.startsWith("timeout ")) {
-			logDebug(`${model.id} timed out`);
+			logDebug(`${modelKey(model)} timed out`);
 			return { failure: { reason: undefined } };
 		}
 		const classified = classifyFailure(err);
-		logDebug(`${model.id} failed (${message}), classifying as ${classified ?? "transient"}`);
+		logDebug(`${modelKey(model)} failed (${message}), classifying as ${classified ?? "transient"}`);
 		return { failure: { reason: classified } };
 	}
 
 	const final = cleanRecap(running);
 	if (!final) {
 		const reason = sawReasoning ? "empty + reasoning" : "empty response";
-		logDebug(`${model.id} produced empty output (${reason})`);
+		logDebug(`${modelKey(model)} produced empty output (${reason})`);
 		return { failure: { reason } };
 	}
-	return { result: { recap: final, modelId: model.id } };
+	return { result: { recap: final, modelId: modelKey(model) } };
 }
 
 /**
